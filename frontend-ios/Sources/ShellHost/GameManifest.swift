@@ -12,8 +12,10 @@ public struct GameManifest: Decodable, Equatable, Sendable {
     public var nroCount: Int
     /// `b-<hex>`: the shader translation chain the game was built with. The shell refuses a different one.
     public var chain: String
-    /// `FR` or `FH`.
+    /// `FR`, `FH` (legacy embedded host), or `FS` (shared runtime).
     public var loader: String
+    /// Required for FS. Absent for existing compiled games.
+    public var sharedRuntime: SharedRuntimeDescriptor? = nil
     public var framework: String
     public var frameworkExecutable: String
     public var imageMarker: String
@@ -39,6 +41,7 @@ public struct GameManifest: Decodable, Equatable, Sendable {
         case nroCount = "nro_count", frameworkExecutable = "framework_executable", imageMarker = "image_marker"
         case shaderMap = "shader_map", romfsMarker = "romfs_marker", romfsIdentity = "romfs_identity", minOS = "min_os"
         case builtBy = "built_by", builtAt = "built_at", console
+        case sharedRuntime = "shared_runtime"
     }
 
     /// Decodes and validates. A problem carries a readable reason for the broken state.
@@ -59,8 +62,26 @@ public struct GameManifest: Decodable, Equatable, Sendable {
         guard manifest.chain.hasPrefix("b-"), manifest.chain.count > 2, manifest.chain.dropFirst(2).allSatisfy(\.isHexDigit) else {
             throw GameProblem(cause: .manifestDamaged, reason: ProblemCause.manifestDamaged.label, detail: hostText("chain \"\(manifest.chain)\" is not of the form b-<hex>."))
         }
-        guard ["FR", "FH"].contains(manifest.loader) else {
+        guard ["FR", "FH", "FS"].contains(manifest.loader) else {
             throw GameProblem(cause: .manifestDamaged, reason: ProblemCause.manifestDamaged.label, detail: hostText("loader \"\(manifest.loader)\" is neither FR nor FH."))
+        }
+        // Fail closed before any native image is loaded. FS cannot silently fall back to FH.
+        guard (manifest.loader == "FS") == (manifest.sharedRuntime != nil),
+              manifest.sharedRuntime?.isWellFormed != false else {
+            throw GameProblem(cause: .manifestUnsupported, reason: hostText("Manifest not supported"),
+                              detail: "Invalid shared_runtime descriptor for loader \(manifest.loader).")
+        }
+        if manifest.loader == "FS" {
+            let paths = [manifest.frameworkExecutable, manifest.profile]
+            guard paths.allSatisfy({ path in
+                !path.isEmpty && !path.hasPrefix("/") && !path.contains("\\") && !path.contains("\0")
+                    && path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
+                        !$0.isEmpty && $0 != "." && $0 != ".."
+                    }
+            }) else {
+                throw GameProblem(cause: .manifestDamaged, reason: ProblemCause.manifestDamaged.label,
+                                  detail: "Shared game paths must stay inside the framework.")
+            }
         }
         guard manifest.framework.hasSuffix(".framework"), !manifest.framework.contains("/") else {
             throw GameProblem(cause: .manifestDamaged, reason: ProblemCause.manifestDamaged.label, detail: hostText("framework \"\(manifest.framework)\" is not a .framework name."))
@@ -105,3 +126,4 @@ func describe(_ error: Error, file: String, cause: ProblemCause) -> GameProblem 
         return GameProblem(cause: cause, reason: short, detail: file)
     }
 }
+

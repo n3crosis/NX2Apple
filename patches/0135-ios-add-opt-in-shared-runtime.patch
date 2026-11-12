@@ -1,0 +1,1692 @@
+From 7aebff2ed61d418f8894321f694b4b713654e772 Mon Sep 17 00:00:00 2001
+From: OpenAI <noreply@openai.com>
+Date: Thu, 12 Nov 2026 19:09:06 +0900
+Subject: [PATCH] iOS: add opt-in shared runtime alongside legacy FH
+
+Split the shared host from FS game images and gate launch by exact runtime,
+profile ABI and shader chain. Preserve existing FH builds and the signed
+payload intake flow. Reset runtime and game state separately on return.
+
+Front-ends: FS manifests require the matching shared runtime descriptor.
+Upstream-Status: pending
+Reason: Opt-in shared runtime for the fork shell while retaining legacy FH builds.
+Issue: none (maintainer-requested shared runtime experiment)
+---
+ dm/games/game.py                          |   4 +-
+ dm/gfx/nvn/nvn_mtl.m                      |   4 +
+ dm/host/dm.h                              |   4 +
+ dm/host/hle_profile.c                     |  16 ++
+ dm/host/hle_profile.h                     |   2 +
+ dm/host/main.c                            |   5 +
+ dm/host/shared_profile.h                  |  10 +
+ dm/ios/Shell/SegSnap.h                    |  13 +-
+ dm/ios/Shell/SharedRuntime.h              |  14 ++
+ dm/ios/Shell/SharedRuntimeChecks.h        |  15 ++
+ dm/ios/Shell/ShellApp.swift               |  20 +-
+ dm/ios/Shell/ShellEngine.h                |   7 +-
+ dm/ios/Shell/ShellMain.m                  | 175 +++++++++++++++---
+ dm/ios/Sources/DmGamepad.m                |   2 +
+ dm/ios/framework/SharedRuntime.c          |  14 ++
+ dm/ios/framework/ShellGlue.m              |  14 ++
+ dm/ios/project-shared-runtime.yml         |  81 +++++++++
+ dm/ios/tests/test_objc_namespace.py       |   4 +
+ dm/ios/tests/test_shared_lifecycle.py     | 163 +++++++++++++++++
+ dm/ios/tests/test_shared_runtime_build.py | 170 +++++++++++++++++
+ dm/ios/tests/test_shared_shell_build.py   | 131 ++++++++++++++
+ dm/ios/tools/build_shared_runtime.sh      |  21 +++
+ dm/ios/tools/build_shell.sh               |  78 ++++++--
+ dm/ios/tools/gen_objc_namespace.py        |   3 +
+ dm/ios/tools/gen_shared_runtime.py        | 211 ++++++++++++++++++++++
+ 25 files changed, 1129 insertions(+), 52 deletions(-)
+ create mode 100644 dm/host/shared_profile.h
+ create mode 100644 dm/ios/Shell/SharedRuntime.h
+ create mode 100644 dm/ios/Shell/SharedRuntimeChecks.h
+ create mode 100644 dm/ios/framework/SharedRuntime.c
+ create mode 100644 dm/ios/project-shared-runtime.yml
+ create mode 100644 dm/ios/tests/test_shared_lifecycle.py
+ create mode 100644 dm/ios/tests/test_shared_runtime_build.py
+ create mode 100644 dm/ios/tests/test_shared_shell_build.py
+ create mode 100755 dm/ios/tools/build_shared_runtime.sh
+ create mode 100755 dm/ios/tools/gen_shared_runtime.py
+
+diff --git a/dm/games/game.py b/dm/games/game.py
+index 581ac8f..0d5a98e 100644
+--- a/dm/games/game.py
++++ b/dm/games/game.py
+@@ -288,7 +288,9 @@ if __name__ == '__main__':
+         g = load(a[1]); out = Path(a[2]); out.parent.mkdir(parents=True, exist_ok=True)
+         M = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', header_one(g), re.M))   # exactly what the compiled profile of this one program would hold (header() is a table of programs for a multi-program game)
+         # macro → the runtime profile's key (hle_profile.c set_kv); the header's spelling of the value is the file's
+-        KEYS = [('title_id', 'ID'), ('program_id', 'PROGRAM_ID'), ('name', 'NAME'), ('romfs_marker', 'ROMFS_MARKER'),
++        KEYS = [('fps_max', 'FPS_MAX'), ('ue_fps_cvar', 'UE_FPS_CVAR'), ('launch_param', 'LAUNCH_PARAM'),
++                ('upscaler_keys', 'UPSCALER_KEYS'), ('upscaler_n', 'UPSCALER_N'),
++                ('title_id', 'ID'), ('program_id', 'PROGRAM_ID'), ('name', 'NAME'), ('romfs_marker', 'ROMFS_MARKER'),
+                 ('modules', 'MODULES'), ('mem_reserve', 'MEM_RESERVE'), ('mem_alias', 'MEM_ALIAS'), ('mem_stack', 'MEM_STACK'),
+                 ('app_pool', 'APP_POOL'), ('mem_used', 'MEM_USED'), ('sys_resource', 'SYS_RESOURCE'), ('mem_map_limit', 'MEM_MAP_LIMIT'),
+                 ('present_interval', 'PRESENT_DISPLAY'), ('core_preempt', 'CORE_PREEMPT'), ('alloc_big_align', 'ALLOC_BIG_ALIGN'),
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index ec9d3d6..76ae58a 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -37,7 +37,11 @@
+ #include "nvn_timestamp.h"
+ #include "msl_image.h"
+ #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
++#ifdef DM_SHARED_RUNTIME_BUILD
++#include "shared_profile.h"
++#else
+ #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
++#endif
+ // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
+ #define NTEX 256
+ // The NVN driver's constant segments c0 and c2 (byte offsets, slot counts) and the binding kinds of the shader reflection have one definition, which the shader build reads too (dmsh_build.py through dmsh_abi.py)
+diff --git a/dm/host/dm.h b/dm/host/dm.h
+index f25138d..2d73758 100644
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -6,7 +6,11 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifdef DM_SHARED_RUNTIME_BUILD
++#include "shared_profile.h"
++#else
+ #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
++#endif
+ #include "hle_profile.h"   // the runtime profile (DM_PROFILE): every constant above can also come from it; dm_profile() is the accessor
+ 
+ // Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff
+diff --git a/dm/host/hle_profile.c b/dm/host/hle_profile.c
+index dd7ef64..7ee08f0 100644
+--- a/dm/host/hle_profile.c
++++ b/dm/host/hle_profile.c
+@@ -130,6 +130,14 @@ static uint64_t num(const char *v, uint64_t dflt) {
+ #endif
+ static void defaults(void) {
+     memset(&P, 0, sizeof P);
++#ifdef DM_SHARED_RUNTIME_BUILD
++    // A shared host must never inherit the game used to prepare its build inputs.
++    // FS requires a generated profile; absent optional keys have neutral defaults.
++    P.shared_font_ttf = -1;
++    copy_str(P.source, sizeof P.source, "shared runtime defaults");
++    P.fps_max = 60;
++    copy_str(P.ue_fps_cvar, sizeof P.ue_fps_cvar, "t.MaxFPS");
++#else
+     copy_str(P.id, sizeof P.id, DM_GAME_ID);
+     copy_str(P.name, sizeof P.name, DM_GAME_NAME);
+     copy_str(P.romfs_marker, sizeof P.romfs_marker, DM_GAME_ROMFS_MARKER);
+@@ -166,6 +174,7 @@ static void defaults(void) {
+     copy_str(P.args, sizeof P.args, DM_GAME_ARGS);
+     copy_str(P.genv, sizeof P.genv, DM_GAME_ENV);
+     copy_str(P.source, sizeof P.source, "compiled game_profile.h");
++#endif
+ }
+ 
+ // ---- one key/value: the same key names as game.tsv (so `game.py` can write the file), plus the header's own names ----
+@@ -233,6 +242,11 @@ static void set_kv(const char *k, const char *v) {
+     else if (!strcmp(k, "ue_texture_pool")) P.ue_texture_pool = (int)num(v, (uint64_t)P.ue_texture_pool);
+     else if (!strcmp(k, "enc_thread")) P.enc_thread = truthy(v);
+     else if (!strcmp(k, "draw_barriers")) P.draw_barriers_game = !strcmp(v, "game") || !strcmp(v, "1");
++    else if (!strcmp(k, "fps_max")) P.fps_max = (int)num(v, 60);
++    else if (!strcmp(k, "ue_fps_cvar")) copy_str(P.ue_fps_cvar, sizeof P.ue_fps_cvar, v);
++    else if (!strcmp(k, "launch_param")) copy_str(P.launch_param, sizeof P.launch_param, v);
++    else if (!strcmp(k, "upscaler_keys")) copy_str(P.upscaler_keys, sizeof P.upscaler_keys, v);
++    else if (!strcmp(k, "upscaler_n")) P.upscaler_n = (int)num(v, 0);
+     else if (!strcmp(k, "game_args")) copy_str(P.args, sizeof P.args, v);
+     else if (!strcmp(k, "game_env")) copy_str(P.genv, sizeof P.genv, v);
+     // any other key (ipa, zip_store, shader_*, build, package, ...) is not a host constant: ignored
+@@ -285,10 +299,12 @@ static void load(void) {
+     const char *path = getenv("DM_PROFILE");
+     if (path && *path) { copy_str(P.source, sizeof P.source, path); read_file(path); }
+     read_env();   // DM_PROF_* overrides apply on top of the file or of the compiled profile
++#ifndef DM_SHARED_RUNTIME_BUILD
+     if (P.nmod <= 0) {   // a profile file that names no modules: the compiled list, which is the one the executable embeds
+         const char *m[] = DM_GAME_MODULES; int n = DM_GAME_NMOD; if (n > DM_PROF_MAX_MOD) n = DM_PROF_MAX_MOD;
+         for (int i = 0; i < n; i++) { copy_str(P.modbuf[i], sizeof P.modbuf[i], m[i]); P.modules[i] = P.modbuf[i]; } P.nmod = n;
+     }
++#endif
+     g_loaded = 1;
+ }
+ 
+diff --git a/dm/host/hle_profile.h b/dm/host/hle_profile.h
+index 9871608..48e9298 100644
+--- a/dm/host/hle_profile.h
++++ b/dm/host/hle_profile.h
+@@ -34,6 +34,8 @@ struct dm_profile {
+     uint32_t shader_skip_off, shader_skip_len;   // shader_key_skip <offset>+<length>: control bytes the shader keys hash as zeros (len 0 = none)
+     int tex_bc_cpu, ue_texture_pool, enc_thread, draw_barriers_game;   // ue_texture_pool in MB (0 = the game's own pool)
+     char args[512], genv[1024];  // game_args / game_env
++    int fps_max, upscaler_n;   // FS-only replacements for newly added compile-time profile sites
++    char ue_fps_cvar[64], launch_param[512], upscaler_keys[4096];
+     char source[512];            // DM_PROFILE, or "compiled defaults"
+ };
+ 
+diff --git a/dm/host/main.c b/dm/host/main.c
+index 959430e..5be996f 100644
+--- a/dm/host/main.c
++++ b/dm/host/main.c
+@@ -70,6 +70,7 @@ const dm_game_t *dm_game_cur(void) {
+ #endif
+ // The modules to load when the command line names none: those of the profile's build row for main's build (its build ID from the rewriter's main.fixups.tsv), else all the profile's
+ // modules. A game's versions may differ in modules: Mario Kart World's base game has main subsdk0 (a Mono runtime) sdk, its update 1.8.0 main subsdk0 (the movie player) subsdk1 sdk
++#ifndef DM_SHARED_RUNTIME_BUILD
+ static int profile_modules(const char *dir, const char **names) {
+     const char *all[] = DM_GAME_MODULES;
+     const struct { const char *build, *mods; } rows[] = {DM_GAME_BUILD_MODULES};
+@@ -93,6 +94,8 @@ static int profile_modules(const char *dir, const char **names) {
+     return DM_GAME_NMOD;
+ }
+ 
++#endif
++
+ // Host loading (independent of UIKit / Metal): read the NSO, relocate, forced take-over, probes / tick gate / keys, start prefetch. By default it runs synchronously in main;
+ // the iOS front end can call dm_host_preload_start(same arguments) at the very start of the App's main() so that it runs first on a background thread, in parallel with the UIKit startup chain (⓪ + ① ≈ max(UIKit chain, host loading)).
+ static pthread_key_t g_race_keys[512];
+@@ -140,7 +143,9 @@ static void host_preload(int argc, char **argv) {
+     }
+     // The modules: the compiled profile's build row for main's build when the runtime profile is the compiled game (profile_modules), else all the runtime profile's modules
+     // (a game served by DM_PROFILE has no build rows in its file yet). Mario: main sdk
++#ifndef DM_SHARED_RUNTIME_BUILD
+     if (!n && !strcmp(prof->id, DM_GAME_ID)) n = profile_modules(argv[1], names);
++#endif
+     if (!n) for (int k = 0; k < prof->nmod; k++) names[n++] = prof->modules[k];
+     load_modules(argv[1], names, n);
+     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
+diff --git a/dm/host/shared_profile.h b/dm/host/shared_profile.h
+new file mode 100644
+index 0000000..cc963ab
+--- /dev/null
++++ b/dm/host/shared_profile.h
+@@ -0,0 +1,10 @@
++// Shared-host projection of compile-time profile sites added after the initial
++// runtime profile extraction. FH still includes its original game_profile.h.
++#pragma once
++#include "hle_profile.h"
++#define DM_GAME_LAUNCH_PARAM (dm_profile()->launch_param)
++#define DM_GAME_UE_FPS_CVAR (dm_profile()->ue_fps_cvar)
++#define DM_GAME_FPS_MAX (dm_profile()->fps_max)
++#define DM_GAME_PRESENT_DISPLAY (dm_profile()->present_display)
++#define DM_GAME_UPSCALER_KEYS (dm_profile()->upscaler_keys)
++#define DM_GAME_UPSCALER_N (dm_profile()->upscaler_n)
+diff --git a/dm/ios/Shell/SegSnap.h b/dm/ios/Shell/SegSnap.h
+index 5ce27ed..68181f7 100644
+--- a/dm/ios/Shell/SegSnap.h
++++ b/dm/ios/Shell/SegSnap.h
+@@ -15,6 +15,7 @@
+ #include <unistd.h>
+ 
+ typedef struct {
++    int complete; // A partial snapshot must never authorize a launch.
+     uint8_t *data_ptr;
+     uint8_t *data_snap;
+     size_t data_sz;
+@@ -47,6 +48,8 @@ static inline __attribute__((unused)) void dm_seg_snap_save_raw(
+ ) {
+     if (!s) return;
+     memset(s, 0, sizeof *s);
++    s->complete = 1;
++    if ((data_sz && !data_ptr) || (common_sz && !common_ptr) || (bss_sz && !bss_ptr)) { s->complete = 0; return; }
+     s->data_ptr = data_ptr;
+     s->data_sz = data_sz;
+     s->common_ptr = common_ptr;
+@@ -57,15 +60,17 @@ static inline __attribute__((unused)) void dm_seg_snap_save_raw(
+     if (s->data_ptr && s->data_sz) {
+         s->data_snap = (uint8_t *)malloc(s->data_sz);
+         if (s->data_snap) memcpy(s->data_snap, s->data_ptr, s->data_sz);
++        else s->complete = 0;
+     }
+     if (s->common_ptr && s->common_sz) {
+         s->common_snap = (uint8_t *)malloc(s->common_sz);
+         if (s->common_snap) memcpy(s->common_snap, s->common_ptr, s->common_sz);
++        else s->complete = 0;
+     }
+     if (s->bss_ptr && s->bss_sz) {
+         uintptr_t b0 = (uintptr_t)s->bss_ptr;
+         size_t sz = s->bss_sz;
+-        if (sz > UINTPTR_MAX - b0) return;
++        if (sz > UINTPTR_MAX - b0) { s->complete = 0; return; }
+         uintptr_t b1 = b0 + sz;
+         size_t pg = (size_t)getpagesize();
+         if (pg < 8U || (pg & (pg - 1U)) != 0) pg = 4096U;
+@@ -108,10 +113,10 @@ static inline __attribute__((unused)) void dm_seg_snap_save_raw(
+                     memcpy(&v, (const void *)a, sizeof v);
+                     if (!v) continue;
+                     if (s->bss_nnz == cap) {
+-                        if (cap > SIZE_MAX / (2U * sizeof s->bss_nz[0])) break;
++                        if (cap > SIZE_MAX / (2U * sizeof s->bss_nz[0])) { s->complete = 0; break; }
+                         size_t ncap = cap ? cap * 2U : 64U;
+                         void *nb = realloc(s->bss_nz, ncap * sizeof s->bss_nz[0]);
+-                        if (!nb) break;
++                        if (!nb) { s->complete = 0; break; }
+                         s->bss_nz = nb;
+                         cap = ncap;
+                     }
+@@ -144,7 +149,7 @@ static inline __attribute__((unused)) void dm_seg_snap_save(const struct mach_he
+ }
+ 
+ static inline __attribute__((unused)) void dm_seg_snap_restore(const DmSegSnap *s) {
+-    if (!s) return;
++    if (!s || !s->complete) return;
+     if (s->data_ptr && s->data_snap && s->data_sz) memcpy(s->data_ptr, s->data_snap, s->data_sz);
+     if (s->common_ptr && s->common_snap && s->common_sz) memcpy(s->common_ptr, s->common_snap, s->common_sz);
+     if (s->bss_ptr && s->bss_sz) {
+diff --git a/dm/ios/Shell/SharedRuntime.h b/dm/ios/Shell/SharedRuntime.h
+new file mode 100644
+index 0000000..4216a45
+--- /dev/null
++++ b/dm/ios/Shell/SharedRuntime.h
+@@ -0,0 +1,14 @@
++// FS is opt-in. FH keeps its existing ShellGlue.h ABI and embedded host.
++#pragma once
++#include <stdint.h>
++#define DM_SHARED_RUNTIME_ABI 1u
++#define DM_SHARED_PROFILE_ABI 1u
++// The pointed-to strings and this descriptor live for the lifetime of their image.
++// Validate all fields before entering host code. runtime_version identifies the
++// exact runtime sources, not just the public function signatures.
++typedef struct dm_shared_descriptor {
++    uint32_t abi;
++    uint32_t profile_abi;
++    const char *runtime_version;
++    const char *shader_chain;
++} dm_shared_descriptor;
+diff --git a/dm/ios/Shell/SharedRuntimeChecks.h b/dm/ios/Shell/SharedRuntimeChecks.h
+new file mode 100644
+index 0000000..2c861f6
+--- /dev/null
++++ b/dm/ios/Shell/SharedRuntimeChecks.h
+@@ -0,0 +1,15 @@
++// Strict shared-runtime compatibility gates. FH uses its existing glue version check.
++#ifndef DM_SHARED_RUNTIME_CHECKS_H
++#define DM_SHARED_RUNTIME_CHECKS_H
++#include "SharedRuntime.h"
++#include <string.h>
++static inline int shared_descriptor_valid(const dm_shared_descriptor *d) {
++    return d && d->abi == DM_SHARED_RUNTIME_ABI && d->profile_abi == DM_SHARED_PROFILE_ABI &&
++        d->runtime_version && d->runtime_version[0] && d->shader_chain && d->shader_chain[0];
++}
++static inline int shared_descriptors_match(const dm_shared_descriptor *game, const dm_shared_descriptor *runtime) {
++    return shared_descriptor_valid(game) && shared_descriptor_valid(runtime) &&
++        !strcmp(game->runtime_version, runtime->runtime_version) &&
++        !strcmp(game->shader_chain, runtime->shader_chain);
++}
++#endif
+diff --git a/dm/ios/Shell/ShellApp.swift b/dm/ios/Shell/ShellApp.swift
+index d86f306..359d0e2 100644
+--- a/dm/ios/Shell/ShellApp.swift
++++ b/dm/ios/Shell/ShellApp.swift
+@@ -18,6 +18,14 @@ struct EngineGameLauncher: GameLauncher {
+     }
+ 
+     @MainActor func launch(_ game: LaunchableGame) async throws {
++        if game.manifest.loader == "FS" {
++            let host = installedSharedRuntime()
++            let chain = (Bundle.main.infoDictionary?["DMChain"] as? String).map { "b-" + $0 }
++            guard let required = game.manifest.sharedRuntime, required.isWellFormed,
++                  host == required, chain == game.manifest.chain else {
++                throw Failure.engine("This game requires a different shared runtime. Update the app.")
++            }
++        }
+         let fm = FileManager.default
+         let documents = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+         let envFile = try? String(contentsOf: documents.appendingPathComponent("env.txt"), encoding: .utf8)
+@@ -37,6 +45,16 @@ struct EngineGameLauncher: GameLauncher {
+     }
+ }
+ 
++/// Native probes inspect the bundled runtime receipt without loading executable code.
++/// An older shell or missing/incompatible runtime never advertises FS support.
++private func installedSharedRuntime() -> SharedRuntimeDescriptor? {
++    let abi = dm_shell_shared_runtime_abi(), profileABI = dm_shell_shared_profile_abi()
++    guard abi == 1, profileABI == 1, let version = dm_shell_shared_runtime_version() else { return nil }
++    let descriptor = SharedRuntimeDescriptor(abi: Int(abi), profileABI: Int(profileABI),
++                                             runtimeVersion: String(cString: version))
++    return descriptor.isWellFormed ? descriptor : nil
++}
++
+ /// `strdup`ed copies for the C call, freed after it (the engine copies what it keeps).
+ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafePointer<CChar>?>) -> R) -> R {
+     let copies: [UnsafePointer<CChar>?] = strings.map { UnsafePointer(strdup($0)) }
+@@ -52,7 +70,7 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
+         let chain = (info["DMChain"] as? String).map { "b-" + $0 }
+         let frameworks = Bundle.main.privateFrameworksURL ?? Bundle.main.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
+         let config = ShellHostConfig(gamesRoot: frameworks, appDataRoot: ShellHostConfig.defaultAppDataRoot(),
+-                                     environment: HostEnvironment(chain: chain),
++                                     environment: HostEnvironment(chain: chain, sharedRuntime: installedSharedRuntime()),
+                                      updateURL: URL(string: "https://github.com/LNPANDY/NX2Apple/releases"), payloads: ShellPayloads.live())
+         let model = ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker())
+         // Begin startup intake before the hosting view observes an inactive scene.
+diff --git a/dm/ios/Shell/ShellEngine.h b/dm/ios/Shell/ShellEngine.h
+index 40f6f04..076117c 100644
+--- a/dm/ios/Shell/ShellEngine.h
++++ b/dm/ios/Shell/ShellEngine.h
+@@ -3,8 +3,13 @@
+ 
+ // Sets the log, the environment (keys[i]=values[i], overwriting) and the working folder, dlopens the game's framework, hands its mach
+ // header to the loader and starts the host's early loading with argv. NULL on success, else a message for the player (the log has
+-// the details). Once per process.
++// the details). One active game at a time; quit returns to the library.
+ const char *dm_shell_start_game(const char *const *keys, const char *const *values, int n, const char *const *argv, int argc,
+                                 const char *executable, const char *marker, const char *log_path, const char *cwd);
+ // After a successful start: the window shows front_ios.m's game view, which starts the game.
+ void dm_shell_present_game(void);
++
++// Bundled shared-runtime receipt; metadata only, with no runtime initialization.
++int dm_shell_shared_runtime_abi(void);
++int dm_shell_shared_profile_abi(void);
++const char *dm_shell_shared_runtime_version(void);
+diff --git a/dm/ios/Shell/ShellMain.m b/dm/ios/Shell/ShellMain.m
+index ce3f22c..124630a 100644
+--- a/dm/ios/Shell/ShellMain.m
++++ b/dm/ios/Shell/ShellMain.m
+@@ -18,6 +18,7 @@
+ #include "SegSnap.h"
+ #include "ShellEngine.h"
+ #include "ShellGlue.h"
++#include "SharedRuntimeChecks.h"
+ #import "DmShell-Swift.h"
+ 
+ extern char **environ;
+@@ -32,47 +33,57 @@ static dm_glue_focus_fn g_focus;
+ static UIViewController *g_library_vc;
+ static char g_active_exe[1024];
+ static const void *g_active_fbase;
++static const void *g_active_runtime_base;
+ static DmFwSnap g_fw_snaps[64];
+ static int g_nfw_snaps;
+ static int g_boot_ok;
+ 
+ static NSString *documents(void) { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]; }
+ 
+-static void clear_game_env(void) {
+-    if (!environ) return;
+-    char names[256][128];
+-    int count = 0;
+-    for (char **ep = environ; *ep && count < 256; ep++) {
+-        const char *kv = *ep;
+-        if (strncmp(kv, "DM_", 3) != 0) continue;
+-        const char *eq = strchr(kv, '=');
+-        if (!eq) continue;
+-        size_t len = (size_t)(eq - kv);
+-        if (len == 0 || len >= sizeof(names[0])) continue;
+-        if ((len == strlen("DM_HUD_PER_LAYER") && !strncmp(kv, "DM_HUD_PER_LAYER", len)) ||
+-            (len == strlen("DM_SHELL_PLAY") && !strncmp(kv, "DM_SHELL_PLAY", len))) {
+-            continue;
++// Restart enumeration after each unsetenv: it can relocate environ. No fixed key/count limit.
++static int clear_game_env(void) {
++    for (;;) {
++        const char *found = NULL;
++        size_t len = 0;
++        for (char **ep = environ; ep && *ep; ep++) {
++            const char *kv = *ep, *eq = strchr(kv, '=');
++            if (strncmp(kv, "DM_", 3) || !eq) continue;
++            len = (size_t)(eq - kv);
++            if ((len == strlen("DM_HUD_PER_LAYER") && !strncmp(kv, "DM_HUD_PER_LAYER", len)) ||
++                (len == strlen("DM_SHELL_PLAY") && !strncmp(kv, "DM_SHELL_PLAY", len))) continue;
++            found = kv;
++            break;
+         }
+-        memcpy(names[count], kv, len);
+-        names[count][len] = '\0';
+-        count++;
++        if (!found) return 1;
++        char *name = strndup(found, len);
++        if (!name) return 0;
++        int rc = unsetenv(name);
++        free(name);
++        if (rc) return 0;
+     }
+-    for (int i = 0; i < count; i++) unsetenv(names[i]);
+ }
+ 
+-static void save_framework_data(const void *fbase) {
+-    if (!fbase) return;
+-    for (int i = 0; i < g_nfw_snaps; i++) if (g_fw_snaps[i].fbase == fbase) return;
+-    if (g_nfw_snaps >= 64) return;
++static int save_framework_data(const void *fbase) {
++    // Never reset the shell's own globals, Objective-C objects or snapshot bookkeeping.
++    if (!fbase || fbase == (const void *)&_mh_execute_header) return 0;
++    for (int i = 0; i < g_nfw_snaps; i++) if (g_fw_snaps[i].fbase == fbase) return 1;
++    if (g_nfw_snaps >= 64) return 0;
+     const struct mach_header_64 *mh = (const struct mach_header_64 *)fbase;
+-    DmFwSnap *s = &g_fw_snaps[g_nfw_snaps++];
++    DmFwSnap *s = &g_fw_snaps[g_nfw_snaps];
+     memset(s, 0, sizeof *s);
+     s->fbase = fbase;
+     dm_seg_snap_save(mh, "__DATA", &s->seg[0]);
+     dm_seg_snap_save(mh, "__DATA_DIRTY", &s->seg[1]);
++    if (!s->seg[0].complete || !s->seg[1].complete) {
++        dm_seg_snap_free(&s->seg[0]); dm_seg_snap_free(&s->seg[1]);
++        memset(s, 0, sizeof *s);
++        return 0;
++    }
++    g_nfw_snaps++;
+     fprintf(stderr, "shell: saved framework state for %p (__data=%#zx, __common=%#zx, __bss=%#zx with %zu initial non-zero words)\n",
+             fbase, s->seg[0].data_sz + s->seg[1].data_sz, s->seg[0].common_sz + s->seg[1].common_sz,
+             s->seg[0].bss_sz + s->seg[1].bss_sz, s->seg[0].bss_nnz + s->seg[1].bss_nnz);
++    return 1;
+ }
+ 
+ static void restore_framework_data(const void *fbase) {
+@@ -91,11 +102,16 @@ void dm_shell_return_to_library(void) {
+         char finished_exe[1024];
+         strlcpy(finished_exe, g_active_exe, sizeof finished_exe);
+         const void *fbase = g_active_fbase;
++        const void *runtime_base = g_active_runtime_base;
+         g_active_fbase = NULL;
++        g_active_runtime_base = NULL;
+         g_active_exe[0] = '\0';
+         g_focus = NULL;
+         g_present = NULL;
+         g_boot_ok = 0;
++        // The runtime invokes this only after all guest/GPU/audio/host work has stopped.
++        // Restore host profile caches and game sections separately; neither is the shell.
++        if (runtime_base) restore_framework_data(runtime_base);
+         if (fbase) restore_framework_data(fbase);
+         UIWindow *window = nil;
+         for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+@@ -129,12 +145,60 @@ static void log_to(NSString *log) {
+     fprintf(stderr, "fork patches: %s\n", [fork_patches isKindOfClass:NSString.class] && fork_patches.length ? fork_patches.UTF8String : "none");
+ }
+ 
++// Discovery is metadata-only: opening the library must not initialize the runtime.
++static NSBundle *shared_runtime_bundle(void) {
++    NSString *path = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"DmSharedRuntime.framework"];
++    return path ? [NSBundle bundleWithPath:path] : nil;
++}
++
++int dm_shell_shared_runtime_abi(void) {
++    id value = [shared_runtime_bundle() objectForInfoDictionaryKey:@"DMSharedRuntimeABI"];
++    return [value isKindOfClass:NSNumber.class] ? [value intValue] : 0;
++}
++
++int dm_shell_shared_profile_abi(void) {
++    id value = [shared_runtime_bundle() objectForInfoDictionaryKey:@"DMSharedProfileABI"];
++    return [value isKindOfClass:NSNumber.class] ? [value intValue] : 0;
++}
++
++const char *dm_shell_shared_runtime_version(void) {
++    static NSString *version;
++    id value = [shared_runtime_bundle() objectForInfoDictionaryKey:@"DMSharedRuntimeVersion"];
++    version = [value isKindOfClass:NSString.class] && [value length] ? value : nil;
++    return version.UTF8String;
++}
++
++static const dm_shared_descriptor *shared_runtime(void **handle, const void **image) {
++    NSBundle *bundle = shared_runtime_bundle();
++    NSString *path = bundle.executablePath;
++    if (!path.length) return NULL;
++    void *h = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
++    if (!h) return NULL;
++    const dm_shared_descriptor *d = dlsym(h, "dm_shared_runtime_descriptor");
++    Dl_info di;
++    if (!d || !dladdr(d, &di) || !di.dli_fbase ||
++        di.dli_fbase == (const void *)&_mh_execute_header || !di.dli_fname) return NULL;
++    // A dependency must not supply the descriptor or any of the entry points.
++    NSString *owner = [@(di.dli_fname) stringByResolvingSymlinksInPath];
++    if (![owner isEqualToString:[path stringByResolvingSymlinksInPath]]) return NULL;
++    const char *version = dm_shell_shared_runtime_version();
++    id chain = [bundle objectForInfoDictionaryKey:@"DMChain"];
++    if (!shared_descriptor_valid(d) || d->abi != (uint32_t)dm_shell_shared_runtime_abi() ||
++        d->profile_abi != (uint32_t)dm_shell_shared_profile_abi() ||
++        !version || strcmp(d->runtime_version, version) ||
++        ![chain isKindOfClass:NSString.class] || strcmp(d->shader_chain, [chain UTF8String])) return NULL;
++    *handle = h;
++    *image = di.dli_fbase;
++    return d; // Images remain loaded for process lifetime, as on the legacy FH path.
++}
++
+ const char *dm_shell_start_game(const char *const *keys, const char *const *values, int n, const char *const *argv, int argc,
+                                 const char *executable, const char *marker, const char *log_path, const char *cwd) {
+     static char err[512];
++    if (![NSThread isMainThread]) return "Game launch must run on the main thread.";
+     if (g_boot_ok) return "A game is already running.";
+     if (argc < 2 || !executable) return "The game's start arguments are incomplete.";
+-    clear_game_env();
++    if (!clear_game_env()) return "Could not clear the previous game environment.";
+     log_to(@(log_path));
+     fprintf(stderr, "shell: starting %s (%s)\n", argv[1], executable);
+     for (int i = 0; i < n; i++) {
+@@ -142,6 +206,30 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
+         fprintf(stderr, "boot: %s=%s\n", keys[i], values[i]);   // every one: a report then shows which of the game's settings reached the engine
+     }
+     if (cwd && *cwd) chdir(cwd);
++    // The native boundary independently verifies FS mode and its immutable profile.
++    // Legacy frameworks without FS metadata keep the existing FH route.
++    NSString *framework = [[@(executable) stringByDeletingLastPathComponent] stringByResolvingSymlinksInPath];
++    NSData *manifest_data = [NSData dataWithContentsOfFile:[framework stringByAppendingPathComponent:@"game.manifest.json"]];
++    id manifest_json = manifest_data ? [NSJSONSerialization JSONObjectWithData:manifest_data options:0 error:nil] : nil;
++    NSDictionary *manifest = [manifest_json isKindOfClass:NSDictionary.class] ? manifest_json : nil;
++    BOOL shared = [manifest[@"loader"] isEqual:@"FS"];
++    BOOL requested_shared = getenv("DM_SHARED_RUNTIME") && !strcmp(getenv("DM_SHARED_RUNTIME"), "1");
++    if (shared != requested_shared) return "The game's runtime mode does not match its manifest.";
++    NSDictionary *shared_manifest = nil;
++    if (shared) {
++        id descriptor = manifest[@"shared_runtime"];
++        id profile = manifest[@"profile"];
++        if (![descriptor isKindOfClass:NSDictionary.class] || ![profile isKindOfClass:NSString.class] ||
++            ![profile length] || [profile isAbsolutePath]) return "The shared runtime manifest is incomplete.";
++        shared_manifest = descriptor;
++        NSString *profile_path = [[framework stringByAppendingPathComponent:profile] stringByResolvingSymlinksInPath];
++        BOOL directory = NO;
++        if (![profile_path hasPrefix:[framework stringByAppendingString:@"/"]] ||
++            ![NSFileManager.defaultManager fileExistsAtPath:profile_path isDirectory:&directory] || directory ||
++            ![NSFileManager.defaultManager isReadableFileAtPath:profile_path])
++            return "The shared runtime game profile is missing or outside its framework.";
++        if (setenv("DM_PROFILE", profile_path.fileSystemRepresentation, 1)) return "Could not select the game's runtime profile.";
++    }
+     // dlopen + dlsym + dladdr verify the framework's image and find its own host's entry points (ShellGlue.h, framework/ShellGlue.m),
+     // after the environment is set and before the framework's host starts loading.
+     void *h = dlopen(executable, RTLD_LAZY | RTLD_LOCAL);
+@@ -158,10 +246,27 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
+         fprintf(stderr, "[RED] boot: %s: %s\n", executable, err);
+         return err;
+     }
+-    const int *ver = dlsym(h, "dm_glue_version");
+-    dm_glue_start_fn start = (dm_glue_start_fn)dlsym(h, "dm_glue_start_game");
+-    dm_glue_present_fn present = (dm_glue_present_fn)dlsym(h, "dm_glue_present_game");
+-    dm_glue_focus_fn focus = (dm_glue_focus_fn)dlsym(h, "dm_glue_focus_event");
++    void *host = h;
++    const void *runtime_base = NULL;
++    if (shared) {
++        const dm_shared_descriptor *game = dlsym(h, "dm_shared_game_descriptor");
++        Dl_info game_desc_info;
++        const dm_shared_descriptor *runtime = shared_runtime(&host, &runtime_base);
++        if (!game || !dladdr(game, &game_desc_info) || game_desc_info.dli_fbase != info.dli_fbase ||
++            !runtime || runtime_base == info.dli_fbase || !shared_descriptors_match(game, runtime))
++            return "This game does not match the bundled shared runtime. Rebuild the game and shell together.";
++        id abi = shared_manifest[@"abi"], profile_abi = shared_manifest[@"profile_abi"];
++        id version = shared_manifest[@"runtime_version"], chain = manifest[@"chain"];
++        if (![abi isKindOfClass:NSNumber.class] || [abi unsignedIntValue] != game->abi ||
++            ![profile_abi isKindOfClass:NSNumber.class] || [profile_abi unsignedIntValue] != game->profile_abi ||
++            ![version isKindOfClass:NSString.class] || strcmp([version UTF8String], game->runtime_version) ||
++            ![chain isKindOfClass:NSString.class] || strcmp([chain UTF8String], game->shader_chain))
++            return "The shared runtime manifest does not match the game's compiled descriptor.";
++    }
++    const int *ver = dlsym(host, "dm_glue_version");
++    dm_glue_start_fn start = (dm_glue_start_fn)dlsym(host, "dm_glue_start_game");
++    dm_glue_present_fn present = (dm_glue_present_fn)dlsym(host, "dm_glue_present_game");
++    dm_glue_focus_fn focus = (dm_glue_focus_fn)dlsym(host, "dm_glue_focus_event");
+     if (!ver || *ver != DM_GLUE_VERSION || !start || !present || !focus) {
+         snprintf(err, sizeof err, "This game's framework was built without its host (glue version %d, expected %d). Rebuild the game in the launcher.",
+                  ver ? *ver : 0, DM_GLUE_VERSION);
+@@ -169,16 +274,28 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
+         return err;
+     }
+     fprintf(stderr, "boot: game framework %s (handle %p, image base %p, glue v%d)\n", executable, h, info.dli_fbase, *ver);
+-    save_framework_data(info.dli_fbase);
++    if (runtime_base) {
++        Dl_info si, pi, fi, vi;
++        if (!dladdr((const void *)start, &si) || !dladdr((const void *)present, &pi) ||
++            !dladdr((const void *)focus, &fi) || !dladdr(ver, &vi) ||
++            si.dli_fbase != runtime_base || pi.dli_fbase != runtime_base ||
++            fi.dli_fbase != runtime_base || vi.dli_fbase != runtime_base)
++            return "The shared runtime entry points belong to a different image.";
++    }
++    if (!save_framework_data(info.dli_fbase) || (runtime_base && !save_framework_data(runtime_base)))
++        return "Could not preserve runtime state for a safe game switch.";
+     const char *why = start(argv, argc, info.dli_fbase);
+     if (why) {
+         snprintf(err, sizeof err, "%s", why);
+         fprintf(stderr, "[RED] boot: %s: %s\n", executable, err);
++        // Shared glue must return an error before starting any asynchronous host work.
++        if (runtime_base) restore_framework_data(runtime_base);
+         restore_framework_data(info.dli_fbase);
+         return err;
+     }
+     strlcpy(g_active_exe, executable, sizeof g_active_exe);
+     g_active_fbase = info.dli_fbase;
++    g_active_runtime_base = runtime_base;
+     g_present = present;
+     g_focus = focus;
+     g_boot_ok = 1;
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index 0e3c942..c2be923 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -31,7 +31,9 @@
+ #include "dm.h"
+ #include "dm_input.h"
+ #include "front.h"
++#ifndef DM_SHARED_RUNTIME_BUILD
+ #include "game_profile.h"
++#endif
+ #include "haptics_apple.h"
+ #include "motion_apple.h"
+ #include "motion_fusion.h"
+diff --git a/dm/ios/framework/SharedRuntime.c b/dm/ios/framework/SharedRuntime.c
+new file mode 100644
+index 0000000..a100d0d
+--- /dev/null
++++ b/dm/ios/framework/SharedRuntime.c
+@@ -0,0 +1,14 @@
++#include "../Shell/SharedRuntime.h"
++#include "shared_runtime_version.h"  // generated identically for host and game
++#if defined(DM_SHARED_GAME_BUILD)
++#define DM_DESCRIPTOR dm_shared_game_descriptor
++#elif defined(DM_SHARED_RUNTIME_BUILD)
++#define DM_DESCRIPTOR dm_shared_runtime_descriptor
++#else
++#error SharedRuntime.c belongs only to the FS targets
++#endif
++__attribute__((used, visibility("default")))
++const dm_shared_descriptor DM_DESCRIPTOR = {
++    DM_SHARED_RUNTIME_ABI, DM_SHARED_PROFILE_ABI,
++    DM_SHARED_RUNTIME_VERSION, DM_SHARED_SHADER_CHAIN
++};
+diff --git a/dm/ios/framework/ShellGlue.m b/dm/ios/framework/ShellGlue.m
+index 05db700..eaae587 100644
+--- a/dm/ios/framework/ShellGlue.m
++++ b/dm/ios/framework/ShellGlue.m
+@@ -11,6 +11,9 @@
+ #include <string.h>
+ #include <sys/stat.h>
+ #include "front.h"
++#ifdef DM_SHARED_RUNTIME_BUILD
++#include "hle_profile.h"
++#endif
+ #include "../Shell/ShellGlue.h"
+ 
+ int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
+@@ -26,6 +29,17 @@ static int g_boot_ok;
+ __attribute__((used, visibility("default")))
+ const char *dm_glue_start_game(const char *const *argv, int argc, const void *game_image) {
+     if (argc < 2 || !game_image) return "The game's start arguments are incomplete.";
++#ifdef DM_SHARED_RUNTIME_BUILD
++    // Do not start threads, make a device, or install the game image until the
++    // runtime profile is readable and supplies the essential game identity/layout.
++    const char *profile = getenv("DM_PROFILE");
++    FILE *pf = profile && *profile ? fopen(profile, "r") : NULL;
++    if (!pf) return "The shared-runtime game profile is missing or unreadable.";
++    fclose(pf);
++    const struct dm_profile *p = dm_profile();
++    if (!p->id[0] || !p->program_id || p->nmod <= 0 || !p->mem_reserve || !p->mem_stack)
++        return "The shared-runtime game profile is incomplete.";
++#endif
+     front_hud_env();   // before the early loading below can make a device (main.m's order)
+     dm_set_game_image_header(game_image);
+     for (int i = 0; i < g_argc; i++) free(g_argv[i]);
+diff --git a/dm/ios/project-shared-runtime.yml b/dm/ios/project-shared-runtime.yml
+new file mode 100644
+index 0000000..7c6be83
+--- /dev/null
++++ b/dm/ios/project-shared-runtime.yml
+@@ -0,0 +1,81 @@
++# Opt-in FS targets. Generated into an existing prepared workspace by gen_shared_runtime.py.
++# No dependency on each other: the shell loads both images explicitly with RTLD_LOCAL.
++name: DmShared
++options:
++  deploymentTarget:
++    iOS: '26.0'
++settings:
++  base:
++    CODE_SIGNING_ALLOWED: NO
++    CODE_SIGNING_REQUIRED: NO
++    CODE_SIGN_IDENTITY: ''
++    SKIP_INSTALL: YES
++    ENABLE_BITCODE: NO
++    DEFINES_MODULE: NO
++    GCC_C_LANGUAGE_STANDARD: gnu11
++    CLANG_ENABLE_OBJC_ARC: YES
++    DYLIB_INSTALL_NAME_BASE: '@rpath'
++    MARKETING_VERSION: '1.0'
++    CURRENT_PROJECT_VERSION: '1'
++    DEBUG_INFORMATION_FORMAT: dwarf
++    SWIFT_VERSION: '5.0'
++targets:
++  DmSharedRuntime:
++    type: framework
++    platform: iOS
++    configFiles:
++      Debug: Gen/shared/runtime.xcconfig
++      Release: Gen/shared/runtime.xcconfig
++    sources:
++      - path: Gen/src
++      - path: Gen/main/main.c
++        compilerFlags: '-Dmain=dm_main'
++      - path: framework/ShellGlue.m
++      - path: framework/SharedRuntime.c
++      - path: Sources/front_ios.m
++      - path: Sources/DmGamepad.m
++      - path: Sources/GameMenu.swift
++      - path: Sources/LauncherSettings.swift
++      - path: Sources/CloudSaves.m
++      - path: Sources/SaveSync.m
++      - path: Sources/DataBookmark.m
++      - path: Gen/shared/shared-runtime.json
++        buildPhase: resources
++    info:
++      path: Gen/shared/Runtime-Info.plist
++      properties:
++        DMSharedRuntimeABI: 1
++        DMSharedProfileABI: 1
++        DMSharedRuntimeVersion: __RUNTIME_VERSION__
++        DMChain: __CHAIN__
++    settings:
++      PRODUCT_NAME: DmSharedRuntime
++      PRODUCT_MODULE_NAME: DmSharedRuntime
++      PRODUCT_BUNDLE_IDENTIFIER: org.nxnative.shared-runtime
++      OTHER_CFLAGS: $(inherited) -mcpu=apple-a18 -DDM_SHARED_RUNTIME_BUILD=1 -include "$(SRCROOT)/Gen/shared/objc_namespace.h"
++      OTHER_SWIFT_FLAGS: $(inherited) -Xcc -include -Xcc "$(SRCROOT)/Gen/shared/objc_namespace.h" -import-objc-header "$(SRCROOT)/Sources/DmGameMenu.h"
++      OTHER_LDFLAGS: $(inherited) -framework UIKit -framework UserNotifications -Wl,-exported_symbols_list,"$(SRCROOT)/Gen/shared/runtime.exports"
++  DmSharedGame:
++    type: framework
++    platform: iOS
++    configFiles:
++      Debug: Gen/shared/game.xcconfig
++      Release: Gen/shared/game.xcconfig
++    sources:
++      - path: Gen/embed.S
++      - path: framework/DmGameMarker.m
++      - path: framework/SharedRuntime.c
++      - path: Gen/shared/dm
++        type: folder
++        buildPhase: resources
++      - path: Gen/framework/profile.tsv
++        buildPhase: resources
++      - path: Gen/shared/game.manifest.json
++        buildPhase: resources
++    info:
++      path: Gen/shared/Game-Info.plist
++    settings:
++      PRODUCT_NAME: __GAME_PRODUCT__
++      PRODUCT_BUNDLE_IDENTIFIER: org.nxnative.game.__TITLE_ID__
++      OTHER_CFLAGS: $(inherited) -mcpu=apple-a18 -DDM_SHARED_GAME_BUILD=1
++      OTHER_LDFLAGS: $(inherited) -Wl,-exported_symbols_list,"$(SRCROOT)/Gen/shared/game.exports"
+diff --git a/dm/ios/tests/test_objc_namespace.py b/dm/ios/tests/test_objc_namespace.py
+index 876e1b2..8692e40 100644
+--- a/dm/ios/tests/test_objc_namespace.py
++++ b/dm/ios/tests/test_objc_namespace.py
+@@ -163,6 +163,8 @@ class ObjCNamespaceScannerTests(unittest.TestCase):
+             (fake_ios / 'Shell/ShellMain.m').write_text(
+                 'void f(void *h) {\n'
+                 '    const char *u = "https://example.invalid/path"; void *p = dlsym(h, "dm_glue_extra_hook");\n'
++                '    dlsym(h, "dm_shared_game_descriptor");\n'
++                '    dlsym(h, "dm_shared_runtime_descriptor");\n'
+                 '    (void)u; (void)p;\n'
+                 '}\n',
+                 encoding='utf-8',
+@@ -170,6 +172,8 @@ class ObjCNamespaceScannerTests(unittest.TestCase):
+             extra = ns.collect_exported_symbols(fake_ios)
+             self.assertIn('_dm_glue_extra_hook', extra)
+             self.assertNotIn('_ignored_comment_marker', extra)
++            self.assertNotIn('_dm_shared_game_descriptor', extra)
++            self.assertNotIn('_dm_shared_runtime_descriptor', extra)
+ 
+ 
+ @unittest.skipUnless(
+diff --git a/dm/ios/tests/test_shared_lifecycle.py b/dm/ios/tests/test_shared_lifecycle.py
+new file mode 100644
+index 0000000..7a1bd62
+--- /dev/null
++++ b/dm/ios/tests/test_shared_lifecycle.py
+@@ -0,0 +1,163 @@
++#!/usr/bin/env python3
++"""Portable reset/ABI unit tests. These do not replace an Apple A -> B -> A gameplay test."""
++from pathlib import Path
++import os
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++IOS = Path(__file__).resolve().parents[1]
++
++
++class SharedLifecycleTests(unittest.TestCase):
++    def test_snapshot_and_compatibility(self):
++        cc = os.environ.get('CC', 'cc')
++        if not shutil.which(cc):
++            self.skipTest('C compiler unavailable')
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            (root / 'mach-o').mkdir()
++            (root / 'mach-o/loader.h').write_text('#pragma once\nstruct mach_header_64 { int unused; };\n')
++            (root / 'mach-o/getsect.h').write_text('''#pragma once
++#include <stdint.h>
++#include "loader.h"
++static inline uint8_t *getsectiondata(const struct mach_header_64 *h, const char *s, const char *n, unsigned long *z) {
++    (void)h; (void)s; (void)n; *z = 0; return 0;
++}
++''')
++            # Exercise the production ABI and snapshot helpers with portable Mach-O discovery stubs.
++            source = root / 'test.c'
++            source.write_text(r'''
++#define _DEFAULT_SOURCE 1
++#include <assert.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <string.h>
++static int fail_malloc, fail_realloc;
++static void *test_malloc(size_t n) { return fail_malloc ? NULL : malloc(n); }
++static void *test_realloc(void *p, size_t n) { return fail_realloc ? NULL : realloc(p, n); }
++// Reading a small, fully mapped test span does not require Darwin's page residency bits.
++static int test_mincore(const void *p, size_t n, void *v) { (void)p; (void)n; (void)v; return -1; }
++#include <sys/mman.h>
++#define malloc test_malloc
++#define realloc test_realloc
++#define mincore test_mincore
++#ifndef MINCORE_INCORE
++#define MINCORE_INCORE 1
++#endif
++#ifndef MINCORE_PAGED_OUT
++#define MINCORE_PAGED_OUT 2
++#endif
++#include "SegSnap.h"
++#undef malloc
++#undef realloc
++#undef mincore
++#include "SharedRuntimeChecks.h"
++
++int main(void) {
++    dm_shared_descriptor runtime = {DM_SHARED_RUNTIME_ABI, DM_SHARED_PROFILE_ABI, "engine-and-patches-a", "chain-a"};
++    dm_shared_descriptor game = runtime;
++    assert(shared_descriptors_match(&game, &runtime));
++    assert(!shared_descriptors_match(NULL, &runtime));
++    game.abi++; assert(!shared_descriptors_match(&game, &runtime)); game = runtime;
++    game.profile_abi++; assert(!shared_descriptors_match(&game, &runtime)); game = runtime;
++    game.runtime_version = "engine-and-patches-b"; assert(!shared_descriptors_match(&game, &runtime)); game = runtime;
++    game.shader_chain = "chain-b"; assert(!shared_descriptors_match(&game, &runtime)); game = runtime;
++    game.runtime_version = NULL; assert(!shared_descriptors_match(&game, &runtime)); game = runtime;
++    game.shader_chain = ""; assert(!shared_descriptors_match(&game, &runtime));
++
++    // Each image has independent initialized/common/BSS state. Host BSS stands for profile caches.
++    uint8_t host_data[16] = {4}, host_common[16] = {5}, host_bss[40] = {6};
++    uint8_t a_data[16] = {10}, a_bss[40] = {11};
++    uint8_t b_data[16] = {20}, b_bss[40] = {21};
++    int shell_library_state = 77; // Shell state is never part of either snapshot.
++    DmSegSnap host, a, b;
++    dm_seg_snap_save_raw(&host, host_data, sizeof host_data, host_common, sizeof host_common, host_bss, sizeof host_bss);
++    dm_seg_snap_save_raw(&a, a_data, sizeof a_data, NULL, 0, a_bss, sizeof a_bss);
++    dm_seg_snap_save_raw(&b, b_data, sizeof b_data, NULL, 0, b_bss, sizeof b_bss);
++    assert(host.complete && a.complete && b.complete);
++    for (int launch = 0; launch < 3; launch++) {
++        DmSegSnap *active = launch == 1 ? &b : &a;
++        uint8_t expected = launch == 1 ? 20 : 10;
++        assert(host_data[0] == 4 && host_common[0] == 5 && host_bss[0] == 6);
++        assert(active->data_ptr[0] == expected);
++        memset(host_data, 90 + launch, sizeof host_data);
++        memset(host_common, 90 + launch, sizeof host_common);
++        memset(host_bss, 90 + launch, sizeof host_bss);
++        memset(active->data_ptr, 90 + launch, active->data_sz);
++        memset(active->bss_ptr, 90 + launch, active->bss_sz);
++        dm_seg_snap_restore(&host);
++        dm_seg_snap_restore(active);
++        assert(shell_library_state == 77);
++    }
++    dm_seg_snap_free(&host); dm_seg_snap_free(&a); dm_seg_snap_free(&b);
++
++    // Allocation failure cannot silently register a corrupt baseline or restore partial data.
++    DmSegSnap failed;
++    fail_malloc = 1;
++    dm_seg_snap_save_raw(&failed, a_data, sizeof a_data, NULL, 0, NULL, 0);
++    assert(!failed.complete);
++    a_data[0] = 99; dm_seg_snap_restore(&failed); assert(a_data[0] == 99);
++    dm_seg_snap_free(&failed); fail_malloc = 0;
++    fail_realloc = 1;
++    dm_seg_snap_save_raw(&failed, NULL, 0, NULL, 0, a_bss, sizeof a_bss);
++    assert(!failed.complete); dm_seg_snap_free(&failed); fail_realloc = 0;
++    dm_seg_snap_save_raw(&failed, NULL, 1, NULL, 0, NULL, 0);
++    assert(!failed.complete); dm_seg_snap_free(&failed);
++    return 0;
++}
++''')
++            binary = root / 'test'
++            subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(root),
++                            '-I', str(IOS / 'Shell'), str(source), '-o', str(binary)], check=True)
++            subprocess.run([str(binary)], check=True)
++
++    def test_environment_reset_has_no_title_count_or_key_length_limit(self):
++        cc = os.environ.get('CC', 'cc')
++        if not shutil.which(cc):
++            self.skipTest('C compiler unavailable')
++        source = (IOS / 'Shell/ShellMain.m').read_text()
++        start = source.index('static int clear_game_env(void)')
++        end = source.index('static int save_framework_data', start)
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / 'environment.c'
++            path.write_text('#define _DEFAULT_SOURCE 1\n#include <assert.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\nextern char **environ;\n' + source[start:end] + r'''
++int main(void) {
++    char key[200];
++    for (int i = 0; i < 320; i++) { snprintf(key, sizeof key, "DM_TEST_%d", i); assert(!setenv(key, "previous-game", 1)); }
++    memset(key, 'X', sizeof key); memcpy(key, "DM_", 3); key[sizeof key - 1] = 0;
++    assert(!setenv(key, "long-previous-game-key", 1));
++    assert(!setenv("DM_PROFILE", "previous/profile", 1));
++    assert(!setenv("DM_HUD_PER_LAYER", "1", 1));
++    assert(!setenv("DM_SHELL_PLAY", "1", 1));
++    assert(!setenv("UNRELATED_APP_SETTING", "keep", 1));
++    assert(clear_game_env()); assert(!getenv(key)); assert(!getenv("DM_PROFILE"));
++    for (int i = 0; i < 320; i++) { snprintf(key, sizeof key, "DM_TEST_%d", i); assert(!getenv(key)); }
++    assert(!strcmp(getenv("DM_HUD_PER_LAYER"), "1"));
++    assert(!strcmp(getenv("DM_SHELL_PLAY"), "1"));
++    assert(!strcmp(getenv("UNRELATED_APP_SETTING"), "keep"));
++    assert(clear_game_env());
++    return 0;
++}
++''')
++            binary = Path(tmp) / 'environment'
++            subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror', str(path), '-o', str(binary)], check=True)
++            subprocess.run([str(binary)], check=True)
++
++    def test_native_routes_keep_images_separate(self):
++        source = (IOS / 'Shell/ShellMain.m').read_text()
++        self.assertIn('fbase == (const void *)&_mh_execute_header', source)
++        self.assertIn('runtime_base == info.dli_fbase', source)
++        self.assertIn('game_desc_info.dli_fbase != info.dli_fbase', source)
++        self.assertIn('restore_framework_data(runtime_base)', source)
++        self.assertIn('restore_framework_data(fbase)', source)
++        self.assertLess(source.index('shared_descriptors_match(game, runtime)'), source.index('start(argv, argc, info.dli_fbase)'))
++        self.assertLess(source.index('save_framework_data(runtime_base)'), source.index('start(argv, argc, info.dli_fbase)'))
++        self.assertIn('void *host = h;', source)  # Legacy FH still uses its own host.
++        discovery = source[source.index('int dm_shell_shared_runtime_abi'):source.index('static const dm_shared_descriptor *shared_runtime(')]
++        self.assertNotIn('dlopen(', discovery)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/dm/ios/tests/test_shared_runtime_build.py b/dm/ios/tests/test_shared_runtime_build.py
+new file mode 100644
+index 0000000..609a87f
+--- /dev/null
++++ b/dm/ios/tests/test_shared_runtime_build.py
+@@ -0,0 +1,170 @@
++"""Portable FS build boundary tests; no Apple SDK or copyrighted game inputs."""
++import importlib.util
++import json
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++IOS = Path(__file__).resolve().parents[1]
++spec = importlib.util.spec_from_file_location('shared_build', IOS / 'tools/gen_shared_runtime.py')
++shared = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(shared)
++
++
++class SharedBuildTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        self.root = Path(self.tmp.name)
++        self.ios = self.root / 'dm/ios'
++        for p in ('tools', 'Sources', 'framework', 'Shell'):
++            (self.ios / p).mkdir(parents=True)
++        for name in ('gen_objc_namespace.py', 'gen_shared_runtime.py'):
++            shutil.copyfile(IOS / 'tools' / name, self.ios / 'tools' / name)
++        shutil.copyfile(IOS / 'project-shared-runtime.yml', self.ios / 'project-shared-runtime.yml')
++        (self.ios.parent / 'host').mkdir()
++        (self.ios.parent / 'host/host.c').write_text('void runtime(void) {}\n')
++        (self.ios / 'Sources/front_ios.m').write_text('@implementation DmRootVC\n@end\n')
++        chain = self.ios.parent / 'gfx/nvn/dmsh_chain.h'
++        chain.parent.mkdir(parents=True)
++        chain.write_text('#define DMSH_CHAIN "0123456789ab"\n')
++        self.ws = self.root / 'workspace'
++        self.gen = self.ws / 'Gen'
++        for p in ('src', 'main', 'framework/dm'):
++            (self.gen / p).mkdir(parents=True)
++        for p in ('embed.S', 'main/main.c', 'framework/profile.tsv'):
++            (self.gen / p).write_text('')
++        (self.gen / 'dm.xcconfig').write_text('HEADER_SEARCH_PATHS = $(inherited) /host\nDM_FRAMEWORKS = -framework Metal\nOTHER_LDFLAGS = $(inherited) -Wl,-segprot,__DMmainW,rw,rw\n')
++        (self.gen / 'framework.xcconfig').write_text('OTHER_LDFLAGS = $(inherited) -Wl,-segprot,__DMmainW,rw,rw\n')
++        self.manifest = dict(schema=1, loader='FH', title_id='0100000000000000', chain='b-0123456789ab',
++                             framework='DmGame0100000000000000.framework', framework_executable='DmGame0100000000000000')
++        (self.gen / 'framework/dm/launcher.json').write_text('{"settings": []}')
++        self.profile = 'title_id\t0100000000000000\nprogram_id\t0x0100000000000000\nmodules\tmain sdk\nmem_reserve\t0x100000000\nmem_stack\t0x100000\nfps_max\t60\nue_fps_cvar\tt.MaxFPS\nlaunch_param\t\nupscaler_keys\t\nupscaler_n\t0\n'
++        (self.gen / 'framework/profile.tsv').write_text(self.profile)
++        self.original = json.dumps(self.manifest)
++        (self.gen / 'framework/game.manifest.json').write_text(self.original)
++
++    def prepare(self):
++        return shared.prepare(self.ios, self.ws)
++
++    def test_legacy_inputs_not_modified(self):
++        receipt = self.prepare()
++        self.assertEqual((self.gen / 'framework/game.manifest.json').read_text(), self.original)
++        self.assertFalse((self.ws / 'DmIOS.xcodeproj').exists())
++        manifest = json.loads((self.gen / 'shared/game.manifest.json').read_text())
++        self.assertEqual(manifest['loader'], 'FS')
++        self.assertEqual(manifest['shared_runtime']['runtime_version'], receipt['runtime_version'])
++        self.assertEqual(receipt['chain'], self.manifest['chain'])
++
++    def test_separate_sources_and_link_flags(self):
++        self.prepare()
++        project = (self.ws / 'project-shared-runtime.yml').read_text()
++        runtime, game = project.split('  DmSharedGame:', 1)
++        self.assertIn('Gen/src', runtime)
++        self.assertNotIn('Gen/embed.S', runtime)
++        self.assertIn('Gen/embed.S', game)
++        self.assertNotIn('Gen/src', game)
++        self.assertNotIn('ShellGlue.m', game)
++        cfg = (self.gen / 'shared/runtime.xcconfig').read_text()
++        self.assertNotIn('-segprot', cfg)
++        self.assertIn('/host "$(SRCROOT)/Gen/shared"', cfg)
++        self.assertIn('-segprot', (self.gen / 'shared/game.xcconfig').read_text())
++        self.assertIn('DmFw_SharedRuntime_DmRootVC', (self.gen / 'shared/objc_namespace.h').read_text())
++        self.assertNotIn('_dm_glue_start_game', (self.gen / 'shared/game.exports').read_text())
++
++    def test_identity_stable_across_workspaces_and_games(self):
++        first = self.prepare()['runtime_version']
++        game = self.ios.parent / 'games/game.tsv'
++        game.parent.mkdir()
++        game.write_text('title_id\tDIFFERENT')
++        (self.gen / 'framework/profile.tsv').write_text(self.profile + 'name\tDifferent Game\n')
++        self.assertEqual(self.prepare()['runtime_version'], first)
++        (self.ios.parent / 'host/host.c').write_text('void changed_runtime(void) {}')
++        self.assertNotEqual(self.prepare()['runtime_version'], first)
++
++    def test_chain_mismatch_rejected(self):
++        self.manifest['chain'] = 'b-ffffffffffff'
++        (self.gen / 'framework/game.manifest.json').write_text(json.dumps(self.manifest))
++        with self.assertRaisesRegex(ValueError, 'shader chain'):
++            self.prepare()
++
++    def test_missing_prepared_input_rejected(self):
++        (self.gen / 'embed.S').unlink()
++        with self.assertRaisesRegex(ValueError, 'missing prepared input'):
++            self.prepare()
++
++    def test_unsafe_product_rejected(self):
++        self.manifest['framework_executable'] = '../../unsafe'
++        (self.gen / 'framework/game.manifest.json').write_text(json.dumps(self.manifest))
++        with self.assertRaisesRegex(ValueError, 'unsafe framework'):
++            self.prepare()
++
++    def test_default_product_becomes_unique(self):
++        self.manifest.update(framework='DmGame.framework', framework_executable='DmGame')
++        (self.gen / 'framework/game.manifest.json').write_text(json.dumps(self.manifest))
++        self.prepare()
++        out = json.loads((self.gen / 'shared/game.manifest.json').read_text())
++        self.assertEqual(out['framework_executable'], 'DmGame0100000000000000')
++        self.assertTrue((self.gen / 'shared/dm/launcher.json').is_file())
++
++    def test_stages_only_shaders_pso_and_icon(self):
++        self.prepare()
++        product = self.ws / 'shared-build/Release-iphoneos' / self.manifest['framework']
++        product.mkdir(parents=True)
++        (product / self.manifest['framework_executable']).write_text('test binary')
++        shaders = self.root / 'shaders'
++        shaders.mkdir()
++        (shaders / 'library.metallib').write_text('synthetic shader')
++        import shlex
++        (self.gen / 'resources.env').write_text('DM_RESOURCE_SHADERS=' + shlex.quote(str(shaders)) +
++            '\nDM_RESOURCE_MSLDIR=b-0123456789ab\nDM_RESOURCE_PSO=\nDM_RESOURCE_ROMFS=/never/read/game-data\n')
++        shared.stage_products(self.ws)
++        self.assertEqual((product / 'msl/b-0123456789ab/library.metallib').read_text(), 'synthetic shader')
++        self.assertFalse((product / 'romfs.img').exists())
++
++    @unittest.skipUnless(shutil.which('cc'), 'needs a C compiler')
++    def test_shared_profile_never_inherits_seed_game(self):
++        fixture = self.root / 'profile-test'
++        fixture.mkdir()
++        for name in ('hle_profile.c', 'hle_profile.h'):
++            shutil.copyfile(IOS.parent / 'host' / name, fixture / name)
++        (fixture / 'dm.h').write_text(
++            '#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <strings.h>\n'
++            '#define LOG(...) ((void)fprintf(stderr, __VA_ARGS__))\n'
++            '#define DM_GAME_ID "SEED"\n#define DM_GAME_NAME "Seed Game"\n'
++            '#define DM_GAME_ROMFS_MARKER "seed-marker"\n#define DM_GAME_MODULES {"seed", "sdk"}\n'
++            '#define DM_GAME_NMOD 2\n#define DM_GAME_PROGRAM_ID 42ull\n#define DM_GAME_TEX_BC_CPU 1\n')
++        source = fixture / 'test.c'
++        profile_path = fixture / 'selected.tsv'
++        profile_path.write_text('title_id\tOTHER\nprogram_id\t99\nmodules\tmain sdk\nfps_max\t120\nue_fps_cvar\tgame.FPS\nlaunch_param\tu32:7\nupscaler_keys\t0123456789abcdef\nupscaler_n\t1\n')
++        source.write_text('#include "hle_profile.c"\n#include <assert.h>\n'
++            'int main(int argc, char **argv) { if (argc > 1) setenv("DM_PROFILE", argv[1], 1); else unsetenv("DM_PROFILE"); const struct dm_profile *p = dm_profile();\n'
++            'if (argc > 1) { assert(!strcmp(p->id, "OTHER")); assert(p->program_id == 99); assert(p->fps_max == 120); assert(!strcmp(p->ue_fps_cvar, "game.FPS")); assert(!strcmp(p->launch_param, "u32:7")); assert(p->upscaler_n == 1); return 0; }\n'
++            '#ifdef DM_SHARED_RUNTIME_BUILD\n'
++            'assert(!p->id[0]); assert(p->nmod == 0); assert(p->program_id == 0); assert(p->tex_bc_cpu == 0);\n'
++            '#else\n'
++            'assert(!strcmp(p->id, "SEED")); assert(p->nmod == 2); assert(p->program_id == 42); assert(p->tex_bc_cpu == 1);\n'
++            '#endif\nreturn 0; }\n')
++        for defines in ([], ['-DDM_SHARED_RUNTIME_BUILD=1']):
++            subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', *defines,
++                            str(source), '-o', str(fixture / 'test')], check=True)
++            subprocess.run([str(fixture / 'test')], check=True)
++            subprocess.run([str(fixture / 'test'), str(profile_path)], check=True)
++
++    @unittest.skipUnless(shutil.which('cc'), 'needs a C compiler')
++    def test_descriptor_header_is_portable(self):
++        self.prepare()
++        source = self.root / 'descriptor.c'
++        source.write_text('#include "SharedRuntime.h"\n#include "shared_runtime_version.h"\n'
++                          'const dm_shared_descriptor descriptor = {DM_SHARED_RUNTIME_ABI, DM_SHARED_PROFILE_ABI, '
++                          'DM_SHARED_RUNTIME_VERSION, DM_SHARED_SHADER_CHAIN};\n'
++                          'int main(void) { return descriptor.abi != 1 || descriptor.profile_abi != 1; }\n')
++        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(IOS / 'Shell'),
++                        '-I', str(self.gen / 'shared'), str(source), '-o', str(self.root / 'test')], check=True)
++        subprocess.run([str(self.root / 'test')], check=True)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/dm/ios/tests/test_shared_shell_build.py b/dm/ios/tests/test_shared_shell_build.py
+new file mode 100644
+index 0000000..129e65a
+--- /dev/null
++++ b/dm/ios/tests/test_shared_shell_build.py
+@@ -0,0 +1,131 @@
++"""Exercise build_shell.sh's actual validation/generation stages without Apple tools."""
++import json
++import os
++import plistlib
++import subprocess
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++SCRIPT = Path(__file__).resolve().parents[1] / 'tools/build_shell.sh'
++
++
++def stage(index, args, env):
++    source = SCRIPT.read_text().split("<<'PY'")[index + 1].split('\n', 1)[1].split('\nPY\n', 1)[0]
++    return subprocess.run([sys.executable, '-I', '-', *map(str, args)], input=source,
++                          env={**os.environ, **env}, text=True, capture_output=True)
++
++
++class SharedShellBuild(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.root = Path(self.temp.name)
++        self.receipt = dict(abi=1, profile_abi=1, runtime_version='fs1-fixture', chain='b-fixture')
++        self.runtime = self.root / 'DmSharedRuntime.framework'
++        self.runtime.mkdir()
++        (self.runtime / 'DmSharedRuntime').write_bytes(b'fixture')
++        self.write_runtime()
++        self.list = self.root / 'frameworks.txt'
++        self.runtime_list = self.root / 'runtime.txt'
++
++    def write_runtime(self):
++        (self.runtime / 'shared-runtime.json').write_text(json.dumps(self.receipt))
++        (self.runtime / 'Info.plist').write_bytes(plistlib.dumps(dict(
++            CFBundleExecutable='DmSharedRuntime', DMSharedRuntimeABI=self.receipt['abi'],
++            DMSharedProfileABI=self.receipt['profile_abi'], DMSharedRuntimeVersion=self.receipt['runtime_version'],
++            DMChain=self.receipt['chain'])))
++
++    def game(self, number, loader='FS', **updates):
++        title = f'{number:016X}'
++        name = 'DmGame' + title
++        path = self.root / (name + '.framework')
++        path.mkdir()
++        (path / name).write_bytes(b'fixture')
++        manifest = dict(title_id=title, name='Fixture', framework=path.name,
++                        framework_executable=name, loader=loader, chain=self.receipt['chain'],
++                        shared_runtime={k: self.receipt[k] for k in ('abi', 'profile_abi', 'runtime_version')})
++        manifest.update(updates)
++        (path / 'game.manifest.json').write_text(json.dumps(manifest))
++        return path
++
++    def validate(self, games, runtime=True):
++        return stage(0, [self.list, self.runtime_list], dict(
++            DM_SHELL_FRAMEWORKS='\n'.join(map(str, games)),
++            DM_SHELL_SHARED_RUNTIME=str(self.runtime) if runtime else ''))
++
++    def test_two_fs_and_legacy_embed_runtime_once_with_signing(self):
++        games = [self.game(1), self.game(2), self.game(3, loader='FH', chain='b-legacy')]
++        result = self.validate(games)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        template = self.root / 'template.yml'
++        template.write_text('dependencies:\n  # @FRAMEWORKS@\n')
++        output = self.root / 'project.yml'
++        result = stage(1, [template, self.list, self.runtime_list, output], {})
++        self.assertEqual(result.returncode, 0, result.stderr)
++        text = output.read_text()
++        self.assertEqual(text.count('DmSharedRuntime.framework'), 1)
++        for path in games: self.assertIn(str(path), text)
++        self.assertEqual(text.count('codeSign: true'), 4)
++        self.assertEqual(text.count('link: false'), 4)
++        self.assertEqual(text.count('embed: true'), 4)
++
++    def test_fs_requires_runtime(self):
++        result = self.validate([self.game(1)], runtime=False)
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('FS requires DM_SHELL_SHARED_RUNTIME', result.stderr)
++        self.assertFalse(self.list.exists())
++
++    def test_legacy_only_different_chains_still_supported(self):
++        result = self.validate([self.game(1, loader='FH', chain='b-old'), self.game(2, loader='FH')], runtime=False)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(self.runtime_list.read_text(), '')
++
++    def test_import_only_shell_can_embed_runtime(self):
++        result = self.validate([])
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(self.list.read_text(), '')
++        self.assertEqual(self.runtime_list.read_text(), str(self.runtime))
++
++    def test_fs_contract_mismatches_rejected(self):
++        for key in ('abi', 'profile_abi', 'runtime_version'):
++            with self.subTest(key=key):
++                required = {k: self.receipt[k] for k in ('abi', 'profile_abi', 'runtime_version')}
++                required[key] = 'wrong'
++                result = self.validate([self.game(len(list(self.root.glob('DmGame*'))) + 1, shared_runtime=required)])
++                self.assertNotEqual(result.returncode, 0)
++                self.assertIn(f'{key} mismatch', result.stderr)
++
++    def test_fs_chain_mismatch_rejected(self):
++        result = self.validate([self.game(1, chain='b-old')])
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('shader chain mismatch', result.stderr)
++
++    def test_runtime_receipt_must_match_native_metadata(self):
++        self.receipt['runtime_version'] = 'fs1-other'
++        (self.runtime / 'shared-runtime.json').write_text(json.dumps(self.receipt))
++        result = self.validate([])
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('receipt disagrees', result.stderr)
++
++    def test_runtime_executable_required(self):
++        (self.runtime / 'DmSharedRuntime').unlink()
++        result = self.validate([])
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('no executable', result.stderr)
++
++    def test_duplicate_titles_rejected(self):
++        game = self.game(1)
++        result = self.validate([game, game])
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('already in the shell', result.stderr)
++
++    def test_unknown_loader_rejected(self):
++        result = self.validate([self.game(1, loader='FR')])
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('built without a host', result.stderr)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/dm/ios/tools/build_shared_runtime.sh b/dm/ios/tools/build_shared_runtime.sh
+new file mode 100755
+index 0000000..663d207
+--- /dev/null
++++ b/dm/ios/tools/build_shared_runtime.sh
+@@ -0,0 +1,21 @@
++#!/bin/bash
++# Opt-in FS build, using a DM_FRAMEWORK=1 tools/build_ipa.sh --prepare-xcode workspace.
++# Usage: build_shared_runtime.sh WORKSPACE [--prepare-only]
++# Produces unsigned frameworks in WORKSPACE/shared-build/Release-iphoneos.
++set -eu
++[ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo 'usage: build_shared_runtime.sh WORKSPACE [--prepare-only]' >&2; exit 2; }
++MODE=${2:-}
++[ -z "$MODE" ] || [ "$MODE" = --prepare-only ] || { echo "unknown mode: $MODE" >&2; exit 2; }
++IOS=$(cd "$(dirname "$0")/.." && pwd)
++W=$(cd "$1" && pwd)
++python3 "$IOS/tools/gen_shared_runtime.py" "$W"
++cd "$W"
++xcodegen generate --spec project-shared-runtime.yml
++[ "$MODE" != --prepare-only ] || exit 0
++for TARGET in DmSharedRuntime DmSharedGame; do
++    xcodebuild -project DmShared.xcodeproj -target "$TARGET" -configuration Release -sdk iphoneos \
++        CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
++        SYMROOT="$W/shared-build" OBJROOT="$W/shared-build/Intermediates.noindex" build
++done
++python3 "$IOS/tools/gen_shared_runtime.py" "$W" --stage-products
++printf 'Unsigned FS frameworks: %s/shared-build/Release-iphoneos\n' "$W"
+diff --git a/dm/ios/tools/build_shell.sh b/dm/ios/tools/build_shell.sh
+index 2ae998a..5e0958a 100755
+--- a/dm/ios/tools/build_shell.sh
++++ b/dm/ios/tools/build_shell.sh
+@@ -9,6 +9,7 @@
+ # Environment:
+ #   SHELL_DIR            the shell's project folder (required; outside dm/ios, on the drive with the games: Gen/, the project, derived data)
+ #   DM_SHELL_FRAMEWORKS  the games' framework folders, one per line (empty builds an import-only shell)
++#   DM_SHELL_SHARED_RUNTIME  DmSharedRuntime.framework built by build_shared_runtime.sh (required for FS games)
+ #   DM_BUNDLE_ID         the shell's bundle ID (default org.nxnative.shell). Keep it for the life of the install: the same ID installed
+ #                        over the existing app keeps its Documents (game data, saves) when it is signed again after 7 days
+ #   DM_TEAM_ID           the signing team for the prepared project (default 0000000000, a placeholder)
+@@ -17,9 +18,8 @@
+ #   DM_XCODE_DERIVED_DATA  derived data (default SHELL_DIR/dd); FONT_PY / STD_FONT as for build_ipa.sh
+ #   DM_GAMES_DIR         passed through, for a provisional game profile
+ #   DM_ENTITLEMENTS      empty: no Increased Memory Limit request in the prepared project (default: requested, as build_ipa.sh does)
+-# The host is compiled from dm/host once, with the first framework's game profile as its compiled defaults (gen_build.py:
+-# game_profile.h). Every host site reads the runtime profile (dm_profile(), hle_profile.h), which the shell points at the chosen game's
+-# profile.tsv before the host starts (DM_PROFILE), so one host runs every game of the shell.
++# Legacy FH games retain their own hosts. FS games share exactly one explicitly selected runtime,
++# validated against every FS game's ABI, version and shader chain before generating the project.
+ set -u
+ cd "$(dirname "$0")/.." || exit 1
+ IOS_SOURCE=$PWD; DM=$(cd .. && pwd); REPO=$(cd "$DM/.." && pwd)
+@@ -37,25 +37,66 @@ export DM_FORK_PATCHES=$(paste -sd, "$DM/fork_patches.txt" 2>/dev/null || true)
+ DD=${DM_XCODE_DERIVED_DATA:-$S/dd}; mkdir -p "$DD" && DD=$(cd "$DD" && pwd)
+ V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h"); [ -n "$V" ] || die "no DMSH_CHAIN in dm/gfx/nvn/dmsh_chain.h"
+ 
+-# Every framework: a manifest with its own host (loader FH), its executable, a title ID of its own
++# Validate game frameworks and the optional shared runtime before touching generated resources.
+ FWLIST=$S/frameworks.txt
+-python3 -I - "$FWLIST" <<'PY' || die "the frameworks in DM_SHELL_FRAMEWORKS (above)"
+-import json, os, sys
+-out = sys.argv[1]
++export DM_SHELL_SHARED_RUNTIME=${DM_SHELL_SHARED_RUNTIME:-}
++python3 -I - "$FWLIST" "$S/runtime.txt" <<'PY' || die "the frameworks in DM_SHELL_FRAMEWORKS (above)"
++import json, os, plistlib, re, sys
++out, runtime_out = sys.argv[1:]
++runtime_path = os.environ['DM_SHELL_SHARED_RUNTIME']
++runtime = None
++if runtime_path:
++    runtime_path = os.path.abspath(runtime_path)
++    if os.path.basename(runtime_path) != 'DmSharedRuntime.framework':
++        sys.exit('[RED] DM_SHELL_SHARED_RUNTIME must name DmSharedRuntime.framework')
++    if not os.path.isfile(os.path.join(runtime_path, 'DmSharedRuntime')):
++        sys.exit('[RED] shared runtime has no executable DmSharedRuntime')
++    try:
++        with open(os.path.join(runtime_path, 'shared-runtime.json'), encoding='utf-8') as f: runtime = json.load(f)
++        with open(os.path.join(runtime_path, 'Info.plist'), 'rb') as f: info = plistlib.load(f)
++    except (OSError, ValueError, plistlib.InvalidFileException) as e:
++        sys.exit(f'[RED] unreadable shared runtime metadata: {e}')
++    if not isinstance(runtime, dict) or not isinstance(info, dict):
++        sys.exit('[RED] invalid shared runtime metadata')
++    if (type(runtime.get('abi')) is not int or runtime['abi'] != 1 or
++            type(runtime.get('profile_abi')) is not int or runtime['profile_abi'] != 1 or
++            not isinstance(runtime.get('runtime_version'), str) or not runtime['runtime_version'] or
++            not isinstance(runtime.get('chain'), str) or not runtime['chain'].startswith('b-')):
++        sys.exit('[RED] unsupported shared runtime ABI, version or chain')
++    for key, native in [('abi', 'DMSharedRuntimeABI'), ('profile_abi', 'DMSharedProfileABI'),
++                        ('runtime_version', 'DMSharedRuntimeVersion'), ('chain', 'DMChain')]:
++        if info.get(native) != runtime[key]:
++            sys.exit(f'[RED] shared runtime receipt disagrees with Info.plist: {key}')
++    if info.get('CFBundleExecutable') != 'DmSharedRuntime':
++        sys.exit('[RED] shared runtime Info.plist has the wrong executable')
+ paths = [p.strip() for p in os.environ['DM_SHELL_FRAMEWORKS'].splitlines() if p.strip()]
+ seen, rows = {}, []
+ for p in paths:
+     p = os.path.abspath(p)
+     try: m = json.load(open(os.path.join(p, 'game.manifest.json'), encoding='utf-8'))
+     except (OSError, ValueError) as e: sys.exit(f'[RED] {p}: no readable game.manifest.json ({e})')
++    if not isinstance(m, dict): sys.exit(f'[RED] {p}: invalid game manifest')
+     name, exe, tid = m.get('framework'), m.get('framework_executable'), m.get('title_id', '')
++    if not isinstance(exe, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', exe): sys.exit(f'[RED] {p}: invalid executable name')
++    if not isinstance(tid, str) or not re.fullmatch(r'[0-9A-Fa-f]{16}', tid): sys.exit(f'[RED] {p}: invalid title ID')
++    tid = tid.upper()
++    if any(c in p for c in '\t\r\n'): sys.exit('[RED] framework path contains a tab or newline')
+     if os.path.basename(p) != name: sys.exit(f'[RED] {p}: the manifest names {name}')
+     if not os.path.isfile(os.path.join(p, exe or '-')): sys.exit(f'[RED] {p}: no executable {exe} (build_ipa.sh DM_FRAMEWORK_ONLY builds it)')
+-    if m.get('loader') != 'FH': sys.exit(f'[RED] {p}: built without a host in the framework (loader {m.get("loader")!r}). Rebuild this game for the shared app.')
++    if m.get('loader') == 'FS':
++        if runtime is None: sys.exit(f'[RED] {p}: FS requires DM_SHELL_SHARED_RUNTIME')
++        required = m.get('shared_runtime')
++        if not isinstance(required, dict): sys.exit(f'[RED] {p}: missing shared_runtime requirements')
++        for key in ('abi', 'profile_abi', 'runtime_version'):
++            if type(required.get(key)) is not type(runtime[key]) or required[key] != runtime[key]:
++                sys.exit(f'[RED] {p}: shared runtime {key} mismatch')
++        if m.get('chain') != runtime['chain']: sys.exit(f'[RED] {p}: shared runtime shader chain mismatch')
++    elif m.get('loader') != 'FH': sys.exit(f'[RED] {p}: built without a host in the framework (loader {m.get("loader")!r}). Rebuild this game for the shared app.')
+     if tid in seen: sys.exit(f'[RED] {p}: title ID {tid} is already in the shell ({seen[tid]})')
+-    seen[tid] = p; rows.append((tid, p, m.get('name', '')))
++    seen[tid] = p; rows.append((tid, p, str(m.get('name', '')).replace('\t', ' ').replace('\r', ' ').replace('\n', ' ')))
+ with open(out, 'w', encoding='utf-8') as f:
+     for tid, p, name in rows: f.write(f'{tid}\t{p}\t{name}\n')
++with open(runtime_out, 'w', encoding='utf-8') as f: f.write(runtime_path)
+ PY
+ export GAME=$(head -1 "$FWLIST" | cut -f1)
+ t "shell: $DM_SHELL_NAME ($DM_BUNDLE_ID), games: $(cut -f3 "$FWLIST" | paste -sd, -)"
+@@ -75,17 +116,19 @@ printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "
+ # out of memory on the device)
+ if [ "$MODE" = --prepare-xcode ] && [ -n "${DM_ENTITLEMENTS-default}" ]; then echo "CODE_SIGN_ENTITLEMENTS = Gen/DmShell.entitlements" >> Gen/dm.xcconfig
+ elif [ "$MODE" = --prepare-xcode ]; then t "entitlements: none (DM_ENTITLEMENTS is empty): no Increased Memory Limit"; fi
+-# The template with one embedded, unlinked framework per game where it says @FRAMEWORKS@
+-python3 -I - "$IOS_SOURCE/project-shell.yml" "$FWLIST" project.yml <<'PY' || die "project.yml"
+-import sys
+-template, fwlist, out = sys.argv[1:]
++# Embed each game and, if selected, the shared runtime once. Xcode signs every embedded framework.
++python3 -I - "$IOS_SOURCE/project-shell.yml" "$FWLIST" "$S/runtime.txt" project.yml <<'PY' || die "project.yml"
++import json, sys
++template, fwlist, runtime_file, out = sys.argv[1:]
+ lines, done = [], False
+ for line in open(template, encoding='utf-8').read().splitlines():
+     if line.lstrip().startswith('# @FRAMEWORKS@'):
+         pad = line[:len(line) - len(line.lstrip())]
+-        for row in open(fwlist, encoding='utf-8').read().splitlines():
+-            path = row.split('\t')[1]
+-            lines += [f'{pad}- framework: "{path}"', f'{pad}  embed: true', f'{pad}  link: false', f'{pad}  codeSign: true']
++        paths = [row.split('\t')[1] for row in open(fwlist, encoding='utf-8').read().splitlines()]
++        runtime_path = open(runtime_file, encoding='utf-8').read()
++        if runtime_path: paths.append(runtime_path)
++        for path in paths:
++            lines += [f'{pad}- framework: {json.dumps(path)}', f'{pad}  embed: true', f'{pad}  link: false', f'{pad}  codeSign: true']
+         done = True
+         continue
+     lines.append(line)
+@@ -113,4 +156,7 @@ APP=$DD/Build/Products/Release-iphoneos/DmShell.app
+ while IFS=$'\t' read -r tid path name; do
+   fw=$APP/Frameworks/$(basename "$path"); [ -d "$fw" ] || die "the app does not embed $(basename "$path")"
+ done < "$FWLIST"
++if [ -s "$S/runtime.txt" ]; then
++  [ -f "$APP/Frameworks/DmSharedRuntime.framework/DmSharedRuntime" ] || die "the app does not embed DmSharedRuntime.framework"
++fi
+ t "done: $APP ($(du -sh "$APP" | cut -f1)), unsigned"
+diff --git a/dm/ios/tools/gen_objc_namespace.py b/dm/ios/tools/gen_objc_namespace.py
+index a5a762b..b234cdf 100644
+--- a/dm/ios/tools/gen_objc_namespace.py
++++ b/dm/ios/tools/gen_objc_namespace.py
+@@ -241,6 +241,9 @@ def collect_exported_symbols(dm_ios_dir: Path | None = None) -> list[str]:
+             )
+             for m in DLSYM_LITERAL_RE.finditer(no_comments):
+                 sym = m.group(1)
++                # FS descriptors belong to separate products, not the legacy FH image.
++                if sym in {'dm_shared_game_descriptor', 'dm_shared_runtime_descriptor'}:
++                    continue
+                 if sym not in names:
+                     names.append(sym)
+     return [f'_{name}' for name in names]
+diff --git a/dm/ios/tools/gen_shared_runtime.py b/dm/ios/tools/gen_shared_runtime.py
+new file mode 100755
+index 0000000..55fed3c
+--- /dev/null
++++ b/dm/ios/tools/gen_shared_runtime.py
+@@ -0,0 +1,211 @@
++#!/usr/bin/env python3
++"""Prepare opt-in FS targets from a DM_FRAMEWORK=1 --prepare-xcode workspace.
++
++Does not build, sign, install or modify the legacy project/manifest. Both targets
++are unsigned; shell integration must embed DmSharedRuntime.framework exactly once.
++"""
++from __future__ import annotations
++import argparse
++import hashlib
++import importlib.util
++import json
++from pathlib import Path
++import re
++import shlex
++import shutil
++
++ABI = PROFILE_ABI = 1
++SOURCE_SUFFIXES = {'.c', '.h', '.m', '.mm', '.inc', '.S', '.metal', '.swift', '.py', '.yml', '.sh'}
++
++
++def runtime_identity(dm: Path) -> str:
++    """Content identity excludes game profiles, generated data and absolute paths."""
++    digest = hashlib.sha256(b'NX2Apple shared runtime ABI 1 / profile ABI 1\0')
++    files = []
++    for name in ('host', 'gfx', 'audio', 'ios', 'third_party'):
++        root = dm / name
++        if not root.is_dir():
++            continue
++        for path in root.rglob('*'):
++            if not path.is_file() or path.is_symlink() or path.suffix not in SOURCE_SUFFIXES:
++                continue
++            rel = path.relative_to(dm)
++            if any(part in {'Gen', 'gen', 'build', 'tests', '__pycache__', '.git'} for part in rel.parts):
++                continue
++            files.append((rel.as_posix(), path))
++    if not any(name.startswith('host/') for name, _ in files):
++        raise ValueError('runtime host sources are missing')
++    for name, path in sorted(files):
++        digest.update(name.encode() + b'\0' + path.read_bytes() + b'\0')
++    return 'fs1-' + digest.hexdigest()
++
++
++def prepare(ios: Path, workspace: Path) -> dict:
++    ios, workspace = ios.resolve(), workspace.resolve()
++    gen = workspace / 'Gen'
++    for path in ('embed.S', 'dm.xcconfig', 'framework.xcconfig', 'src', 'main/main.c',
++                 'framework/game.manifest.json', 'framework/profile.tsv', 'framework/dm'):
++        if not (gen / path).exists():
++            raise ValueError(f'missing prepared input Gen/{path}; prepare with DM_FRAMEWORK=1 first')
++    if (gen / 'dm/programs.txt').exists():
++        raise ValueError('FS multi-program builds are not supported yet')
++    manifest = json.loads((gen / 'framework/game.manifest.json').read_text())
++    if manifest.get('loader') not in ('FR', 'FH'):
++        raise ValueError('expected a freshly prepared FR/FH source manifest')
++    chain_text = (ios.parent / 'gfx/nvn/dmsh_chain.h').read_text()
++    match = re.search(r'^#define DMSH_CHAIN "([0-9a-f]+)"', chain_text, re.M)
++    if not match:
++        raise ValueError('invalid shader chain header')
++    chain = 'b-' + match[1]
++    if manifest.get('chain') != chain:
++        raise ValueError('prepared game shader chain does not match the runtime')
++    title = manifest.get('title_id', '')
++    if not re.fullmatch('[0-9A-Fa-f]{16}', title):
++        raise ValueError('invalid manifest title_id')
++    executable = manifest.get('framework_executable', '')
++    if not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', executable):
++        raise ValueError('unsafe framework executable')
++    if manifest.get('framework') != executable + '.framework':
++        raise ValueError('framework folder and executable disagree')
++    if executable == 'DmGame':
++        executable += title.upper()
++        manifest['framework_executable'] = executable
++        manifest['framework'] = executable + '.framework'
++    profile_rows = {}
++    for line in (gen / 'framework/profile.tsv').read_text().splitlines():
++        if len(line.encode()) >= 4095:
++            raise ValueError('runtime profile row exceeds the host reader limit')
++        if line and not line.startswith('#'):
++            key, _, value = line.partition('\t')
++            profile_rows[key] = value
++    required = {'title_id', 'program_id', 'modules', 'mem_reserve', 'mem_stack',
++                'fps_max', 'ue_fps_cvar', 'launch_param', 'upscaler_keys', 'upscaler_n'}
++    if required - profile_rows.keys():
++        raise ValueError('runtime profile needs regeneration for FS: missing ' +
++                         ', '.join(sorted(required - profile_rows.keys())))
++    if profile_rows['title_id'].upper() != title.upper():
++        raise ValueError('runtime profile title does not match manifest')
++    keys = profile_rows['upscaler_keys']
++    if keys and not re.fullmatch('[0-9a-fA-F]{16}(,[0-9a-fA-F]{16})*', keys):
++        raise ValueError('invalid runtime upscaler shader keys')
++    if int(profile_rows['upscaler_n']) != (len(keys.split(',')) if keys else 0):
++        raise ValueError('runtime upscaler key count does not match')
++    descriptor = dict(abi=ABI, profile_abi=PROFILE_ABI, runtime_version=runtime_identity(ios.parent))
++    shared = gen / 'shared'
++    shared.mkdir(exist_ok=True)
++    if (shared / 'dm').exists():
++        shutil.rmtree(shared / 'dm')
++    shutil.copytree(gen / 'framework/dm', shared / 'dm')
++    launcher = gen / 'dm/launcher.json'
++    if not launcher.is_file():
++        launcher = gen / 'framework/dm/launcher.json'
++    if not launcher.is_file():
++        raise ValueError('missing prepared launcher settings')
++    shutil.copyfile(launcher, shared / 'dm/launcher.json')
++    receipt = dict(descriptor, chain=chain)
++    (shared / 'shared-runtime.json').write_text(json.dumps(receipt, indent=2) + '\n')
++    (shared / 'shared_runtime_version.h').write_text(
++        '#pragma once\n#define DM_SHARED_RUNTIME_VERSION ' + json.dumps(descriptor['runtime_version']) +
++        '\n#define DM_SHARED_SHADER_CHAIN ' + json.dumps(chain) + '\n')
++    manifest['loader'] = 'FS'
++    manifest['shared_runtime'] = descriptor
++    (shared / 'game.manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
++    # Host link configuration deliberately discards all embedded game segment flags.
++    config = (gen / 'dm.xcconfig').read_text().splitlines()
++    config = [line for line in config if not line.lstrip().startswith(('OTHER_LDFLAGS', 'CODE_SIGN_ENTITLEMENTS'))]
++    config = [line + ' "$(SRCROOT)/Gen/shared"' if line.startswith('HEADER_SEARCH_PATHS') else line for line in config]
++    config += ['OTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS)']
++    (shared / 'runtime.xcconfig').write_text('\n'.join(config) + '\n')
++    (shared / 'game.xcconfig').write_text((gen / 'framework.xcconfig').read_text() +
++        '\nHEADER_SEARCH_PATHS = $(inherited) "$(SRCROOT)/Gen/shared"\n')
++    # Namespace every host Objective-C class; never borrow a per-game FH namespace.
++    spec = importlib.util.spec_from_file_location('shared_objc_namespace', ios / 'tools/gen_objc_namespace.py')
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    classes = module.scan_objc_classes(module.default_source_roots(ios.parent))
++    if not classes:
++        raise ValueError('no runtime Objective-C classes found')
++    (shared / 'objc_namespace.h').write_text(module.render_namespace_header('SharedRuntime', classes))
++    exports = ['dm_glue_version', 'dm_glue_start_game', 'dm_glue_present_game', 'dm_glue_focus_event',
++               'dm_shared_runtime_descriptor']
++    (shared / 'runtime.exports').write_text(''.join('_' + s + '\n' for s in exports))
++    (shared / 'game.exports').write_text('_dmgame_image_marker\n_dm_shared_game_descriptor\n')
++    for name in ('Sources', 'framework', 'Shell'):
++        dest = workspace / name
++        if not dest.exists():
++            dest.symlink_to(ios / name, target_is_directory=True)
++    template = (ios / 'project-shared-runtime.yml').read_text()
++    values = {'__GAME_PRODUCT__': executable, '__TITLE_ID__': title.lower(),
++              '__RUNTIME_VERSION__': descriptor['runtime_version'], '__CHAIN__': chain}
++    for old, new in values.items():
++        template = template.replace(old, new)
++    (workspace / 'project-shared-runtime.yml').write_text(template)
++    return receipt
++
++
++def stage_products(workspace: Path) -> None:
++    """Stage game-owned resources, never ROMFS, into the unsigned FS product."""
++    gen = workspace / 'Gen'
++    manifest = json.loads((gen / 'shared/game.manifest.json').read_text())
++    executable = manifest['framework_executable']
++    if not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', executable):
++        raise ValueError('unsafe framework executable')
++    product = workspace / 'shared-build/Release-iphoneos' / (executable + '.framework')
++    if not (product / executable).is_file():
++        raise ValueError('FS game framework has not been built')
++    paths = {}
++    # Parse the generated assignments as data. Never source or eval an env file.
++    for line in (gen / 'resources.env').read_text().splitlines():
++        words = shlex.split(line, comments=True)
++        if not words:
++            continue
++        if len(words) != 1 or '=' not in words[0]:
++            raise ValueError('invalid prepared resource assignment')
++        key, value = words[0].split('=', 1)
++        paths[key] = value
++    if paths.get('DM_RESOURCE_PROGRAMS'):
++        raise ValueError('FS multi-program builds are not supported yet')
++    folder = paths.get('DM_RESOURCE_MSLDIR', '')
++    if folder not in (manifest['chain'], 'vk', 'gl'):
++        raise ValueError('shader resource folder does not match FS game')
++    shaders = Path(paths.get('DM_RESOURCE_SHADERS', ''))
++    if not shaders.exists() or not paths.get('DM_RESOURCE_SHADERS'):
++        raise ValueError('prepared shader libraries are missing')
++    dest = product / 'msl'
++    if dest.exists():
++        shutil.rmtree(dest)
++    dest.mkdir()
++    if shaders.is_dir():
++        shutil.copytree(shaders, dest / folder)
++    else:
++        shutil.copyfile(shaders, dest / (folder + '.img'))
++    pso = paths.get('DM_RESOURCE_PSO', '')
++    dest = product / 'pso'
++    if dest.exists():
++        shutil.rmtree(dest)
++    if pso:
++        shutil.copytree(pso, dest)
++    icon = gen / 'Assets.xcassets/AppIcon.appiconset/icon.png'
++    if icon.is_file():
++        shutil.copyfile(icon, product / 'icon.png')
++    elif (product / 'icon.png').exists():
++        (product / 'icon.png').unlink()
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('workspace', type=Path)
++    parser.add_argument('--stage-products', action='store_true')
++    args = parser.parse_args()
++    try:
++        if args.stage_products:
++            stage_products(args.workspace.resolve())
++            return
++        result = prepare(Path(__file__).resolve().parents[1], args.workspace)
++    except (OSError, ValueError, KeyError) as exc:
++        parser.error(str(exc))
++    print(json.dumps(result, sort_keys=True))
++
++
++if __name__ == '__main__':
++    main()
+-- 
+2.52.0
+

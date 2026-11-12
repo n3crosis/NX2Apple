@@ -8,13 +8,17 @@ private let logger = Logger(subsystem: "dev.nx2apple.shell", category: "catalogu
 /// with and the OS it runs on. A nil chain skips the chain check (the demo has no engine).
 public struct HostEnvironment: Equatable, Sendable {
     public var chain: String?
+    /// Nil when this shell has no compatible shared runtime installed.
+    public var sharedRuntime: SharedRuntimeDescriptor?
     public var osVersion: OperatingSystemVersion
-    public init(chain: String? = nil, osVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion) {
+    public init(chain: String? = nil, osVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion,
+                sharedRuntime: SharedRuntimeDescriptor? = nil) {
+        self.sharedRuntime = sharedRuntime
         self.chain = chain
         self.osVersion = osVersion
     }
     public static func == (a: Self, b: Self) -> Bool {
-        a.chain == b.chain && a.osVersion.majorVersion == b.osVersion.majorVersion
+        a.chain == b.chain && a.sharedRuntime == b.sharedRuntime && a.osVersion.majorVersion == b.osVersion.majorVersion
             && a.osVersion.minorVersion == b.osVersion.minorVersion && a.osVersion.patchVersion == b.osVersion.patchVersion
     }
 }
@@ -302,8 +306,15 @@ public enum GameStateResolver {
     public static func state(for entry: CatalogueEntry, data: DataResolution, environment: HostEnvironment) -> GameState {
         if let problem = entry.problem { return problem.state }
         guard let manifest = entry.manifest else { return GameProblem(cause: .manifestMissing, reason: hostText("Game manifest missing")).state }
+        if manifest.loader == "FS" {
+            // A missing shell chain is a demo/unsupported host, not permission to skip FS checks.
+            guard let required = manifest.sharedRuntime, required.isWellFormed,
+                  required == environment.sharedRuntime,
+                  environment.chain == manifest.chain else { return .needsAppUpdate }
+        }
         if manifest.loader != "FH", let chain = environment.chain, chain != manifest.chain { return .needsAppUpdate }
         if let min = manifest.minOSVersion, !isVersion(environment.osVersion, atLeast: min) { return .needsAppUpdate }
         return data.found ? .playable : .needsGameData
     }
 }
+
