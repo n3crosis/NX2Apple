@@ -8,7 +8,7 @@ extension BuildStore {
     // MARK: Installing on a device
 
     /// The installer with this store's tools, log, stages and process hand-off wired in. The install and the export (BuildStore+Export.swift) share it.
-    func makeInstaller() -> ShellInstaller {
+    func makeInstaller(cancellation: LockedFlag? = nil) -> ShellInstaller {
         let python = deps.pythonPath.isEmpty ? Toolchain.findPython().path : deps.pythonPath
         var installer = ShellInstaller(xcrun: devices.xcrun, repo: repo.path, python: python, root: shellRoot, device: devices.installDevice, team: devices.signingTeam)
         installer.deviceName = devices.deviceName(devices.installDevice)
@@ -31,7 +31,8 @@ extension BuildStore {
         installer.processStarted = { @Sendable p in hop { self.proc = p } }
         // The size and the connection are shown with Continue, "Wait for a cable" and "Not now" (ShellCopyCard)
         let target = devices
-        let cancel = installCancel
+        let cancel = cancellation ?? installCancel
+        installer.cancelled = { cancel.value }
         installer.decideCopy = { plan in cancel.value ? .skip : target.askCopy(plan) }
         installer.waiting = { on in if !cancel.value || !on { target.setWaiting(on) } }
         installer.waitCancelled = { cancel.value || target.waitCancelled }
@@ -40,7 +41,9 @@ extension BuildStore {
 
     /// Steps 4 to 7 of the shared app (ShellInstall.swift) for a game whose framework is built and whose archive is packed: the
     /// shell's project, signing, the install over the app that is already there, and the game data the device lacks.
-    package func installShell(framework: String, titleID: String, name: String, archive: String, dataOnly: Bool = false) {
+    package func installShell(framework: String, titleID: String, name: String, archive: String, dataOnly: Bool = false, dataFolder: String? = nil) {
+        installCancellation.set(false)
+        shellInstallActive = true
         buildingGame = true
         runningTarget = BuildTarget.ios
         beginOperation(dataOnly ? .sendingGameData : .installing, game: name, titleID: titleID, destination: .target)
@@ -49,13 +52,14 @@ extension BuildStore {
         running = true
         finderShown = false
         if dataOnly { failure = nil; done = false; doneNote = "" }
+        else { payloadDelivery = nil; payloadRetryHost = nil }
         shellBatchRetry = nil
-        shellRetry = (framework, titleID, name, archive)
-        let installer = makeInstaller()
+        shellRetry = (framework, titleID, name, archive, dataFolder)
+        let installer = makeInstaller(cancellation: installCancellation)
         let target = devices
         let device = devices.installDevice
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = dataOnly ? installer.installData(titleID: titleID, archive: archive)
+            let result = dataOnly ? installer.installData(titleID: titleID, archive: archive, dataFolder: dataFolder)
                                   : installer.install(framework: framework, titleID: titleID, name: name, archive: archive)
             if !dataOnly, result.ok {
                 PostBuildCleanup.cleanBuiltFrameworkContainer(framework)
@@ -63,6 +67,13 @@ extension BuildStore {
             hop {
                 self.installPhaseActive = false
                 target.copyEnded()
+                self.shellInstallActive = false
+                if !dataOnly {
+                    self.payloadDelivery = result.payloadDelivery
+                    self.shellRetry?.dataFolder = result.payloadDataFolder
+                    self.payloadRetryHost = result.payloadDataFolder == nil ? nil
+                        : (device, installer.team, installer.root, result.bundleID)
+                }
                 if self.stopping {
                     self.stopping = false; self.running = false
                     self.resetProgress(); self.doneNote = self.t("msg.stopped"); self.cleanupStaging()
@@ -87,6 +98,7 @@ extension BuildStore {
 
     /// Signs and installs the shared app from the frameworks already built, without rebuilding any game or copying `romfs.img` data.
     package func installBuiltShell(framework: String, titleID: String, name: String) {
+        payloadDelivery = nil; payloadRetryHost = nil; shellBatchRetry = nil; shellRetry = nil
         buildingGame = false
         runningTarget = BuildTarget.ios
         beginOperation(.installing, game: nil, titleID: nil, destination: .target)
@@ -125,6 +137,8 @@ extension BuildStore {
     /// Signs and installs the shared app once for all successful games of a queued batch, then transfers their missing game data.
     package func installShellBatch(_ games: [DeferredShellGame], dataOnly: Bool = false) {
         guard let last = games.last else { return }
+        payloadDelivery = nil; payloadRetryHost = nil
+        shellInstallActive = true
         buildingGame = false
         runningTarget = BuildTarget.ios
         beginOperation(dataOnly ? .sendingGameData : .installing, game: games.count == 1 ? last.name : nil,
@@ -135,7 +149,7 @@ extension BuildStore {
         if dataOnly { stages = [] }
         finderShown = false
         shellBatchRetry = games
-        shellRetry = (last.framework, last.titleID, last.name, last.archive)
+        shellRetry = (last.framework, last.titleID, last.name, last.archive, nil)
         let batchGames = games.map {
             ShellInstaller.BatchGame(framework: $0.framework, titleID: $0.titleID, name: $0.name, archive: $0.archive,
                                      pickedArtwork: pickedArtworkForTitleID($0.titleID))
@@ -155,6 +169,13 @@ extension BuildStore {
             hop {
                 self.installPhaseActive = false
                 target.copyEnded()
+                self.shellInstallActive = false
+                self.payloadDelivery = result.payloadDelivery
+                if let dataFolder = result.payloadDataFolder {
+                    self.shellBatchRetry = nil
+                    self.shellRetry?.dataFolder = dataFolder
+                    self.payloadRetryHost = (device, installer.team, installer.root, result.bundleID)
+                }
                 if self.stopping {
                     self.stopping = false; self.running = false
                     self.resetProgress(); self.doneNote = self.t("msg.stopped"); self.cleanupStaging()
@@ -192,7 +213,15 @@ extension BuildStore {
             return
         }
         guard let r = shellRetry else { return }
-        installShell(framework: r.framework, titleID: r.titleID, name: r.name, archive: r.archive, dataOnly: true)
+        if r.dataFolder != nil {
+            guard let origin = payloadRetryHost,
+                  devices.installDevice == origin.device, devices.signingTeam == origin.team,
+                  shellRoot == origin.root, ShellLibrary.load(root: origin.root).bundleID == origin.bundleID else {
+                doneNote = t("payload.retryTargetChanged")
+                return
+            }
+        }
+        installShell(framework: r.framework, titleID: r.titleID, name: r.name, archive: r.archive, dataOnly: true, dataFolder: r.dataFolder)
     }
 
     /// Cancels an active drive copy or post-build device install wait when no child process is running.
@@ -240,6 +269,7 @@ extension BuildStore {
                 self.doneNote = String(format: self.t("dev.reinstallFailed"), error)
             } else {
                 self.running = false
+                self.payloadDelivery = nil
                 self.doneNote = String(format: self.t("dev.reinstalled"), self.devices.deviceName(device))
                 self.cleanupStaging()
             }
@@ -322,6 +352,7 @@ extension BuildStore {
                             } else {
                                 self.installedOn = device
                                 self.installedAppPath = app
+                                self.payloadDelivery = nil
                                 self.doneNote = String(format: self.t("dev.resigned"), name)
                             }
                             self.running = false

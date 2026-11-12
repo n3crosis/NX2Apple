@@ -34,10 +34,10 @@ import NXLauncher
                     ?? self.library.games.first { $0.titleID.caseInsensitiveCompare(item.titleID) == .orderedSame }
                 if let game = found {
                     let commit = game.toolsCommit.isEmpty ? self.buildCommit : game.toolsCommit
-                    self.library.recordCompletedIOS(archive: item.archive, app: app, device: device, commit: commit, for: game.id)
+                    self.library.recordCompletedIOS(archive: item.archive, app: app, device: device, commit: commit, payloadOnly: self.build.payloadDelivery != nil, for: game.id)
                 }
             }
-            self.library.recordSharedAppInstalled(app: app, device: device)
+            if self.build.payloadDelivery == nil { self.library.recordSharedAppInstalled(app: app, device: device) }
             self.recorded.send()
         }
         build.onBuiltGamesInstalled = { [weak self] app, device in
@@ -87,7 +87,7 @@ import NXLauncher
         if build.runningTarget == BuildTarget.mac {
             library.recordCompletedApp(path: build.macAppPath, commit: buildCommit, for: id)
         } else if !build.installedAppPath.isEmpty {
-            library.recordCompletedIOS(archive: build.archivePath, app: build.installedAppPath, device: build.installedOn, commit: buildCommit, for: id)
+            library.recordCompletedIOS(archive: build.archivePath, app: build.installedAppPath, device: build.installedOn, commit: buildCommit, payloadOnly: build.payloadDelivery != nil, for: id)
         } else if !build.archivePath.isEmpty, var game = library.games.first(where: { $0.id == id }) {
             game.archivePath = build.archivePath
             game.lastTarget = BuildTarget.ios
