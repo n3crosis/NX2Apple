@@ -176,6 +176,13 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     /// True when `running` is a game build rather than a standalone post-build action (`resignOnDevice`, `reinstallOnDevice`,
     /// `saveIPA`, `sendGameData`, `copyToDrive`, `confirmShellMove`).
     package var buildingGame = true
+    /// Opt-in for newly built shell games only. Existing FH frameworks are never converted.
+    @Published package var sharedRuntime = false
+
+    package var sharedRuntimeArguments: [String] {
+        sharedRuntime && target != BuildTarget.mac && !exportsOneGame ? ["--shared-runtime"] : []
+    }
+
     /// Decode BC-compressed textures on the CPU. Only relevant for GPUs without BC support
     /// (A15/A16 and older): on a device that has it the GPU path is always better, so the switch
     /// is a compatibility option and defaults off. Passed as DM_PROF_TEX_BC_CPU through --env-file,

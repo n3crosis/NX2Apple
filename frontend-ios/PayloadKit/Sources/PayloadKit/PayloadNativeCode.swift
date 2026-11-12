@@ -76,12 +76,13 @@ public enum PayloadNativeCode {
         guard let info = try PropertyListSerialization.propertyList(from: infoData, format: nil) as? [String: Any],
               info["CFBundleExecutable"] as? String == manifest.executable else { throw PayloadError.invalid("framework Info.plist") }
         let game = try JSONSerialization.jsonObject(with: Data(contentsOf: gameURL)) as? [String: Any]
-        guard let game, game["schema"] as? Int == 1, game["loader"] as? String == "FH",
+        guard let game, game["schema"] as? Int == 1, game["loader"] as? String == (manifest.sharedRuntime == nil ? "FH" : "FS"),
               game["title_id"] as? String == manifest.titleID, game["framework"] as? String == manifest.framework,
               game["framework_executable"] as? String == manifest.executable,
               game["display_version"] as? String == manifest.displayVersion, game["min_os"] as? String == manifest.minOS,
               let modules = game["modules"] as? [String], !modules.isEmpty,
               modules.allSatisfy(PayloadManifest.safePath) else { throw PayloadError.invalid("game manifest") }
+        try manifest.validateGameMetadata(at: framework)
         for key in ["profile", "shader_map", "launcher"] {
             guard let path = game[key] as? String, PayloadManifest.safePath(path),
                   manifest.files.contains(where: { $0.path == manifest.framework + "/" + path }) else {

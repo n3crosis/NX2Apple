@@ -63,6 +63,38 @@ final class ShellPayloadTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: framework.appendingPathComponent("DmGame").path), "build product remains")
     }
 
+    func testMissingSharedRuntimeCacheFailsBeforeSendingPayload() throws {
+        let (installer, framework, runner) = try fixture()
+        let path = framework.appendingPathComponent("game.manifest.json")
+        var game = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any])
+        game["loader"] = "FS"
+        game["chain"] = "b-0123456789ab"
+        game["shared_runtime"] = ["abi": 1, "profile_abi": 1, "runtime_version": "fs1-test"] as [String: Any]
+        try JSONSerialization.data(withJSONObject: game).write(to: path)
+        runner.host.sharedRuntime = .init(abi: 1, profileABI: 1, runtimeVersion: "fs1-test", chain: "b-0123456789ab")
+
+        let result = installer.install(framework: framework.path, titleID: title, name: "Fixture", archive: "")
+        XCTAssertFalse(result.ok)
+        XCTAssertTrue(result.message.contains("Missing DmSharedRuntime.framework"), result.message)
+        XCTAssertNil(runner.payload)
+        XCTAssertNil(runner.ready)
+        XCTAssertFalse(runner.launches.contains { $0.arguments.starts(with: ["devicectl", "device", "copy", "to"]) })
+        assertNoShellInstall(runner)
+    }
+
+    func testLocalLibraryWriteFailureDoesNotSendPayload() throws {
+        let (installer, framework, runner) = try fixture()
+        let state = ShellLibrary.stateFile(root: temp.appendingPathComponent("shell").path)
+        try FileManager.default.createDirectory(atPath: state, withIntermediateDirectories: true)
+
+        let result = installer.install(framework: framework.path, titleID: title, name: "Fixture", archive: "")
+        XCTAssertFalse(result.ok)
+        XCTAssertNil(runner.payload)
+        XCTAssertNil(runner.ready)
+        XCTAssertFalse(runner.launches.contains { $0.arguments.starts(with: ["devicectl", "device", "copy", "to"]) })
+        assertNoShellInstall(runner)
+    }
+
     func testSupportedShellErrorsNeverFallBackToAnIPAInstall() throws {
         for legacyProtocol in [false, true] {
             let (installer, framework, runner) = try fixture()

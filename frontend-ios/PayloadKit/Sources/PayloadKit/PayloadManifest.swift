@@ -24,11 +24,14 @@ public struct PayloadCapabilities: Codable, Sendable, Equatable {
     public var glueABI: Int
     public var osVersion: String
     public var executableSHA256: String?
+    /// Present only when this installed shell supports FS payload schema 2.
+    public var sharedRuntime: PayloadSharedRuntime?
 
     public init(bundleID: String, teamID: String, glueABI: Int = 1,
-                osVersion: String = "26.0", executableSHA256: String? = nil) {
+                osVersion: String = "26.0", executableSHA256: String? = nil, sharedRuntime: PayloadSharedRuntime? = nil) {
         self.bundleID = bundleID; self.teamID = teamID; self.glueABI = glueABI; self.osVersion = osVersion
         self.executableSHA256 = executableSHA256
+        self.sharedRuntime = sharedRuntime
     }
 }
 
@@ -43,6 +46,7 @@ public struct PayloadManifest: Codable, Sendable, Equatable {
         }
     }
 
+    public var sharedRuntime: PayloadSharedRuntime?
     public var schema: Int = 1
     public var generation: String
     public var titleID: String
@@ -55,14 +59,17 @@ public struct PayloadManifest: Codable, Sendable, Equatable {
     public var files: [File]
 
     public init(generation: String = UUID().uuidString.lowercased(), titleID: String, displayVersion: String,
-                framework: String, executable: String, minOS: String, glueABI: Int = 1, teamID: String, files: [File]) {
+                framework: String, executable: String, minOS: String, glueABI: Int = 1, teamID: String, files: [File],
+                sharedRuntime: PayloadSharedRuntime? = nil) {
         self.generation = generation; self.titleID = titleID; self.displayVersion = displayVersion
         self.framework = framework; self.executable = executable; self.minOS = minOS
         self.glueABI = glueABI; self.teamID = teamID; self.files = files
+        self.sharedRuntime = sharedRuntime
+        self.schema = sharedRuntime == nil ? 1 : 2
     }
 
     public func validate() throws {
-        guard schema == 1, UUID(uuidString: generation) != nil, generation == generation.lowercased(),
+        guard schema == (sharedRuntime == nil ? 1 : 2), sharedRuntime?.isWellFormed != false, UUID(uuidString: generation) != nil, generation == generation.lowercased(),
               titleID.count == 16, titleID.allSatisfy({ $0.isHexDigit && !$0.isLowercase }),
               framework.hasSuffix(".framework"), Self.safeComponent(framework),
               Self.safeComponent(executable), !teamID.isEmpty, teamID.count <= 128,
@@ -93,6 +100,11 @@ public struct PayloadManifest: Codable, Sendable, Equatable {
 
     public func compatible(with host: PayloadCapabilities) throws {
         try validate()
+        if let sharedRuntime {
+            guard sharedRuntime == host.sharedRuntime else {
+                throw PayloadError.incompatible("installed shared runtime ABI, profile ABI, version, or shader chain")
+            }
+        }
         guard host.version == PayloadCapabilities.protocolVersion, glueABI == host.glueABI,
               teamID == host.teamID, Self.version(minOS)! <= (Self.version(host.osVersion) ?? 0) else {
             throw PayloadError.incompatible("host version, signing team, or glue ABI")

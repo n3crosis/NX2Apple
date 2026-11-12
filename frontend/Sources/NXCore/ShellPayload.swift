@@ -25,8 +25,8 @@ extension ShellInstaller {
         let read = runner.capture(ProcessLaunch(executable: readCommand[0], arguments: Array(readCommand.dropFirst()), mergesErrors: true, timeout: 30))
         if cancelled() { return Outcome(ok: false, message: fmt("payload.failed", "cancelled")) }
         guard read.ok, fm.fileExists(atPath: capabilitiesFile.path) else {
-            guard fm.fileExists(atPath: knownHost.path) else { return nil }
-            // A transient read/lock failure after negotiation must not turn a
+            guard fm.fileExists(atPath: knownHost.path) || ShellInstall.requiresSharedRuntime(framework) else { return nil }
+            // An FS transfer or transient read failure after negotiation must not turn a
             // game update into a shell reinstall. A verified uninstall may use
             // the first-install route again.
             let listing = stage.appendingPathComponent("apps.json")
@@ -43,6 +43,12 @@ extension ShellInstaller {
                   capabilities.teamID == team else { throw PayloadError.incompatible("shell protocol, bundle, or signing team") }
             try fm.createDirectory(at: knownHost.deletingLastPathComponent(), withIntermediateDirectories: true)
             try PayloadArchive.encode(capabilities).write(to: knownHost, options: .atomic)
+            // Negotiate the exact installed runtime before signing or transferring.
+            // Never install a runtime or replace the signed shell on this route.
+            let requirement = try PayloadSharedRuntime.requirement(at: URL(fileURLWithPath: framework))
+            if let requirement, requirement != capabilities.sharedRuntime {
+                throw PayloadError.incompatible("installed shared runtime ABI, profile ABI, version, or shader chain")
+            }
             let identity = try payloadIdentity(host: capabilities, stage: stage)
             let source = URL(fileURLWithPath: framework)
             let copied = stage.appendingPathComponent(source.lastPathComponent)
@@ -70,19 +76,28 @@ extension ShellInstaller {
             }
             let gameData = try Data(contentsOf: copied.appendingPathComponent("game.manifest.json"))
             guard let game = try JSONSerialization.jsonObject(with: gameData) as? [String: Any],
-                  game["title_id"] as? String == titleID, game["loader"] as? String == "FH",
+                  game["title_id"] as? String == titleID, ["FH", "FS"].contains(game["loader"] as? String ?? ""),
                   let executable = game["framework_executable"] as? String,
                   let version = game["display_version"] as? String, let minOS = game["min_os"] as? String else {
                 throw PayloadError.invalid("game manifest")
             }
             let manifest = PayloadManifest(titleID: titleID, displayVersion: version, framework: copied.lastPathComponent,
                                            executable: executable, minOS: minOS, teamID: capabilities.teamID,
-                                           files: try PayloadArchive.fileList(framework: copied, checkCancellation: checkPayloadCancellation))
+                                           files: try PayloadArchive.fileList(framework: copied, checkCancellation: checkPayloadCancellation),
+                                           sharedRuntime: requirement)
+            try manifest.validateGameMetadata(at: copied)
             try manifest.compatible(with: capabilities)
             let packed = stage.appendingPathComponent(PayloadArchive.fileName)
             try PayloadArchive.write(manifest: manifest, parent: stage, to: packed, checkCancellation: checkPayloadCancellation)
             let ready = PayloadArchive.Ready(generation: manifest.generation, bytes: try PayloadArchive.size(packed),
                                              sha256: try PayloadArchive.digest(packed, checkCancellation: checkPayloadCancellation), partSize: UInt64(partSize))
+            // Finish fallible local cache work before the first device write.
+            // A missing runtime or library-write failure must never report a
+            // failed transfer after the phone has already received its ready marker.
+            // This cache records build products, not device activation state.
+            var library = ShellLibrary.load(root: root)
+            library.add(.init(titleID: titleID, name: name, framework: framework))
+            try savePayloadLibrary(&library, preferredFramework: framework)
             try sendPayload(packed, ready: ready, bundle: bundle, stage: stage, label: label)
 
             // Query once. A closed/busy shell processes the complete transaction
@@ -102,11 +117,6 @@ extension ShellInstaller {
                 case .rejected: throw PayloadError.invalid(receipt.detail)
                 }
             }
-            // Remember build products for subsequent export/refresh actions,
-            // without generating an Xcode project or changing the signed app.
-            var library = ShellLibrary.load(root: root)
-            library.add(.init(titleID: titleID, name: name, framework: framework))
-            try savePayloadLibrary(&library)
             end(Self.payloadStageID, label, ok: true)
             var result = Outcome(ok: true, message: message, appPath: ShellInstall.appPath(root: root), bundleID: bundle)
             result.payloadDelivery = delivery
@@ -129,11 +139,13 @@ extension ShellInstaller {
 
     /// Commit cache mirrors with the library, restoring the previous copies if
     /// its atomic write fails. Successful updates release replaced mirrors.
-    func savePayloadLibrary(_ library: inout ShellLibrary) throws {
+    func savePayloadLibrary(_ library: inout ShellLibrary, preferredFramework: String = "") throws {
         ShellInstall.sweepDiscarded(in: ShellInstall.frameworksMirror(root: root))
+        let runtime = try ShellInstall.prepareSharedRuntime(root: root, library: &library, preferredFramework: preferredFramework)
         let replaced = mirrorFrameworks(&library)
         do { try library.save(root: root) }
         catch {
+            runtime?.rollback()
             for (mirror, previous) in replaced {
                 guard ShellInstall.discard(mirror) else {
                     log("library: the previous framework stays at \(previous), its replacement could not be moved away\n")
@@ -144,6 +156,7 @@ extension ShellInstaller {
             }
             throw error
         }
+        runtime?.commit()
         for (_, previous) in replaced { ShellInstall.discard(previous) }
     }
 

@@ -1,0 +1,246 @@
+From: OpenAI <noreply@openai.com>
+Subject: [PATCH] iOS: harden shared runtime handoff and payload negotiation
+
+Preserve the previous runtime and game products on publication failure.
+Advertise the installed runtime identity and shader chain for payload intake.
+Validate the namespace generator before importing it.
+
+Front-ends: FS payloads require the exact installed runtime descriptor.
+Upstream-Status: pending
+Reason: Complete the opt-in shared runtime integration without replacing legacy FH.
+Issue: none (maintainer-requested shared runtime experiment)
+
+diff --git a/dm/ios/Shell/ShellApp.swift b/dm/ios/Shell/ShellApp.swift
+index 359d0e2..596e386 100644
+--- a/dm/ios/Shell/ShellApp.swift
++++ b/dm/ios/Shell/ShellApp.swift
+@@ -71,7 +71,7 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
+         let frameworks = Bundle.main.privateFrameworksURL ?? Bundle.main.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
+         let config = ShellHostConfig(gamesRoot: frameworks, appDataRoot: ShellHostConfig.defaultAppDataRoot(),
+                                      environment: HostEnvironment(chain: chain, sharedRuntime: installedSharedRuntime()),
+-                                     updateURL: URL(string: "https://github.com/LNPANDY/NX2Apple/releases"), payloads: ShellPayloads.live())
++                                     updateURL: URL(string: "https://github.com/LNPANDY/NX2Apple/releases"), payloads: ShellPayloads.live(environment: HostEnvironment(chain: chain, sharedRuntime: installedSharedRuntime())))
+         let model = ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker())
+         // Begin startup intake before the hosting view observes an inactive scene.
+         let startupPayloads = model.refreshPayloads()
+diff --git a/dm/ios/tests/test_shared_runtime_pipeline.py b/dm/ios/tests/test_shared_runtime_pipeline.py
+index a33850a..c501025 100644
+--- a/dm/ios/tests/test_shared_runtime_pipeline.py
++++ b/dm/ios/tests/test_shared_runtime_pipeline.py
+@@ -4,6 +4,7 @@ from pathlib import Path
+ import shutil
+ import tempfile
+ import unittest
++from unittest import mock
+ 
+ SCRIPT = Path(__file__).resolve().parents[3] / 'scripts/build_ipa_from_nsp.py'
+ 
+@@ -82,6 +83,70 @@ class SharedRuntimePipelineTests(unittest.TestCase):
+             self.invoke()
+         self.assertEqual((old / 'legacy-only').read_text(), 'FH')
+ 
++    def test_replacement_failures_restore_the_previous_pair(self):
++        # Fail while backing up or publishing either product, not only while building.
++        for failed_move in range(1, 5):
++            with self.subTest(failed_move=failed_move):
++                self.setUp()
++                old, other = self.seed_legacy()
++                runtime = self.output / 'DmSharedRuntime.framework'
++                runtime.mkdir()
++                (runtime / 'previous').write_text('old runtime')
++                rename = Path.rename
++                calls = 0
++                def fail_once(source, target):
++                    nonlocal calls
++                    calls += 1
++                    if calls == failed_move:
++                        raise OSError('injected rename failure')
++                    return rename(source, target)
++                with mock.patch.object(Path, 'rename', fail_once):
++                    with self.assertRaisesRegex(OSError, 'injected rename failure'):
++                        self.invoke()
++                self.assertEqual((old / 'legacy-only').read_text(), 'FH')
++                self.assertEqual((runtime / 'previous').read_text(), 'old runtime')
++                self.assertEqual((other / 'keep').read_text(), 'FH')
++                self.assertFalse(list(self.output.glob('.shared-stage-*')))
++
++    def test_failed_first_install_removes_the_new_partial_pair(self):
++        rename = Path.rename
++        def fail_runtime(source, target):
++            if Path(target) == self.output / 'DmSharedRuntime.framework':
++                raise OSError('injected rename failure')
++            return rename(source, target)
++        with mock.patch.object(Path, 'rename', fail_runtime):
++            with self.assertRaisesRegex(OSError, 'injected rename failure'):
++                self.invoke()
++        self.assertEqual(list(self.output.iterdir()), [])
++
++    def test_cancellation_restores_legacy_game(self):
++        old, _ = self.seed_legacy()
++        rename = Path.rename
++        def cancel_runtime(source, target):
++            if Path(target) == self.output / 'DmSharedRuntime.framework':
++                raise KeyboardInterrupt()
++            return rename(source, target)
++        with mock.patch.object(Path, 'rename', cancel_runtime):
++            with self.assertRaises(KeyboardInterrupt):
++                self.invoke()
++        self.assertEqual((old / 'legacy-only').read_text(), 'FH')
++        self.assertFalse((self.output / 'DmSharedRuntime.framework').exists())
++        self.assertFalse(list(self.output.glob('.shared-stage-*')))
++
++    def test_failed_rollback_preserves_recovery_files(self):
++        old, _ = self.seed_legacy()
++        rename = Path.rename
++        def fail_publish_and_recovery(source, target):
++            if Path(target) in (old, self.output / 'DmSharedRuntime.framework'):
++                raise OSError('injected persistent rename failure')
++            return rename(source, target)
++        with mock.patch.object(Path, 'rename', fail_publish_and_recovery):
++            with self.assertRaisesRegex(ValueError, 'recovery files preserved at'):
++                self.invoke()
++        stages = list(self.output.glob('.shared-stage-*'))
++        self.assertEqual(len(stages), 1)
++        self.assertEqual((stages[0] / (old.name + '.previous') / 'legacy-only').read_text(), 'FH')
++
+     def test_flag_is_opt_in_and_requires_shell_framework(self):
+         tree = ast.parse(SCRIPT.read_text())
+         source = SCRIPT.read_text()
+diff --git a/dm/ios/tests/test_shared_shell_build.py b/dm/ios/tests/test_shared_shell_build.py
+index 129e65a..53d1931 100644
+--- a/dm/ios/tests/test_shared_shell_build.py
++++ b/dm/ios/tests/test_shared_shell_build.py
+@@ -29,6 +29,7 @@ class SharedShellBuild(unittest.TestCase):
+         self.write_runtime()
+         self.list = self.root / 'frameworks.txt'
+         self.runtime_list = self.root / 'runtime.txt'
++        self.runtime_chain = self.root / 'runtime-chain.txt'
+ 
+     def write_runtime(self):
+         (self.runtime / 'shared-runtime.json').write_text(json.dumps(self.receipt))
+@@ -51,7 +52,7 @@ class SharedShellBuild(unittest.TestCase):
+         return path
+ 
+     def validate(self, games, runtime=True):
+-        return stage(0, [self.list, self.runtime_list], dict(
++        return stage(0, [self.list, self.runtime_list, self.runtime_chain], dict(
+             DM_SHELL_FRAMEWORKS='\n'.join(map(str, games)),
+             DM_SHELL_SHARED_RUNTIME=str(self.runtime) if runtime else ''))
+ 
+@@ -71,6 +72,17 @@ class SharedShellBuild(unittest.TestCase):
+         self.assertEqual(text.count('link: false'), 4)
+         self.assertEqual(text.count('embed: true'), 4)
+ 
++    def test_shell_advertises_bundled_runtime_chain_not_checkout_chain(self):
++        self.receipt['chain'] = 'b-older-runtime'
++        self.write_runtime()
++        result = self.validate([self.game(1)])
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(self.runtime_chain.read_text(), 'older-runtime')
++        script = SCRIPT.read_text()
++        self.assertIn('V=$(cat "$S/runtime-chain.txt")', script)
++        self.assertLess(script.index('V=$(cat "$S/runtime-chain.txt")'),
++                        script.index('Add :DMChain string $V'))
++
+     def test_fs_requires_runtime(self):
+         result = self.validate([self.game(1)], runtime=False)
+         self.assertNotEqual(result.returncode, 0)
+@@ -81,6 +93,7 @@ class SharedShellBuild(unittest.TestCase):
+         result = self.validate([self.game(1, loader='FH', chain='b-old'), self.game(2, loader='FH')], runtime=False)
+         self.assertEqual(result.returncode, 0, result.stderr)
+         self.assertEqual(self.runtime_list.read_text(), '')
++        self.assertEqual(self.runtime_chain.read_text(), '')
+ 
+     def test_import_only_shell_can_embed_runtime(self):
+         result = self.validate([])
+diff --git a/dm/ios/tools/build_shell.sh b/dm/ios/tools/build_shell.sh
+index 5e0958a..57d34b6 100755
+--- a/dm/ios/tools/build_shell.sh
++++ b/dm/ios/tools/build_shell.sh
+@@ -40,9 +40,9 @@ V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h"); [
+ # Validate game frameworks and the optional shared runtime before touching generated resources.
+ FWLIST=$S/frameworks.txt
+ export DM_SHELL_SHARED_RUNTIME=${DM_SHELL_SHARED_RUNTIME:-}
+-python3 -I - "$FWLIST" "$S/runtime.txt" <<'PY' || die "the frameworks in DM_SHELL_FRAMEWORKS (above)"
++python3 -I - "$FWLIST" "$S/runtime.txt" "$S/runtime-chain.txt" <<'PY' || die "the frameworks in DM_SHELL_FRAMEWORKS (above)"
+ import json, os, plistlib, re, sys
+-out, runtime_out = sys.argv[1:]
++out, runtime_out, chain_out = sys.argv[1:]
+ runtime_path = os.environ['DM_SHELL_SHARED_RUNTIME']
+ runtime = None
+ if runtime_path:
+@@ -97,7 +97,11 @@ for p in paths:
+ with open(out, 'w', encoding='utf-8') as f:
+     for tid, p, name in rows: f.write(f'{tid}\t{p}\t{name}\n')
+ with open(runtime_out, 'w', encoding='utf-8') as f: f.write(runtime_path)
++with open(chain_out, 'w', encoding='utf-8') as f: f.write(runtime['chain'][2:] if runtime else '')
+ PY
++# The shell carries no shader engine of its own. Advertise the selected runtime
++# chain, not the checkout used to package it, so compatible older FS pairs work.
++if [ -s "$S/runtime-chain.txt" ]; then V=$(cat "$S/runtime-chain.txt") || die "runtime chain"; fi
+ export GAME=$(head -1 "$FWLIST" | cut -f1)
+ t "shell: $DM_SHELL_NAME ($DM_BUNDLE_ID), games: $(cut -f3 "$FWLIST" | paste -sd, -)"
+ 
+diff --git a/dm/ios/tools/gen_shared_runtime.py b/dm/ios/tools/gen_shared_runtime.py
+index 55fed3c..0b056fb 100755
+--- a/dm/ios/tools/gen_shared_runtime.py
++++ b/dm/ios/tools/gen_shared_runtime.py
+@@ -120,6 +120,8 @@ def prepare(ios: Path, workspace: Path) -> dict:
+         '\nHEADER_SEARCH_PATHS = $(inherited) "$(SRCROOT)/Gen/shared"\n')
+     # Namespace every host Objective-C class; never borrow a per-game FH namespace.
+     spec = importlib.util.spec_from_file_location('shared_objc_namespace', ios / 'tools/gen_objc_namespace.py')
++    if spec is None or spec.loader is None:
++        raise ValueError('cannot load Objective-C namespace generator')
+     module = importlib.util.module_from_spec(spec)
+     spec.loader.exec_module(module)
+     classes = module.scan_objc_classes(module.default_source_roots(ios.parent))
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index 973a247..310e381 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -3354,14 +3354,38 @@ def build_shared_shell_framework(repo, work, destination, title_id, env, logs, o
+         if not (framework / name).is_file() or not (framework / receipt).is_file():
+             raise BuildError(f'incomplete shared-runtime product: {framework}')
+     destination.mkdir(parents=True, exist_ok=True)
+-    # Copy both products before replacing either destination. Never merge an FS product into an old FH bundle.
+-    with tempfile.TemporaryDirectory(prefix='.shared-stage-', dir=destination) as stage:
+-        for name in names:
+-            shutil.copytree(products / (name + '.framework'), Path(stage) / (name + '.framework'))
++    # Stage on the destination volume so publication and rollback use renames,
++    # not copies. Keep the old pair until both new products have been published.
++    stage = Path(tempfile.mkdtemp(prefix='.shared-stage-', dir=destination))
++    backups, installed = [], []
++    cleanup = True
++    try:
+         for name in names:
+-            target = destination / (name + '.framework')
+-            rmtree(target)
+-            shutil.move(str(Path(stage) / target.name), target)
++            shutil.copytree(products / (name + '.framework'), stage / (name + '.framework'))
++        try:
++            for name in names:
++                target = destination / (name + '.framework')
++                if target.exists() or target.is_symlink():
++                    backup = stage / (target.name + '.previous')
++                    target.rename(backup)
++                    backups.append((target, backup))
++                (stage / target.name).rename(target)
++                installed.append(target)
++        except BaseException:
++            try:
++                for target in reversed(installed):
++                    target.rename(stage / target.name)
++                for target, backup in reversed(backups):
++                    backup.rename(target)
++            except BaseException as recovery_error:
++                # Never erase the only old copy if a filesystem error also blocks
++                # recovery. Leave its location in the error for a manual retry.
++                cleanup = False
++                raise BuildError(f'shared-runtime rollback failed; recovery files preserved at {stage}: {recovery_error}') from recovery_error
++            raise
++    finally:
++        if cleanup:
++            rmtree(stage)
+ 
+ 
+ def main(args=None):

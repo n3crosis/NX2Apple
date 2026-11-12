@@ -78,6 +78,27 @@ import Combine
         return url.path
     }
 
+    func testSharedRuntimeIsOptInAndOnlyAppliesToShellFrameworkBuilds() {
+        let store = makeStore()
+        store.target = BuildTarget.ios
+        XCTAssertFalse(store.sharedRuntime)
+        XCTAssertEqual(store.sharedRuntimeArguments, [])
+        store.sharedRuntime = true
+        XCTAssertEqual(store.sharedRuntimeArguments, ["--shared-runtime"])
+        devices.exportIPA = true
+        XCTAssertEqual(store.sharedRuntimeArguments, ["--shared-runtime"])
+        devices.exportOneGame = true
+        XCTAssertEqual(store.sharedRuntimeArguments, [])
+        devices.exportOneGame = false
+        store.target = BuildTarget.mac
+        XCTAssertEqual(store.sharedRuntimeArguments, [])
+        store.target = BuildTarget.ios
+        XCTAssertEqual(store.sharedRuntimeArguments, ["--shared-runtime"])
+        store.sharedRuntime = false
+        XCTAssertEqual(store.sharedRuntimeArguments, [])
+        XCTAssertFalse(makeStore().sharedRuntime)
+    }
+
     // MARK: The conditions to start
 
     func testABuildMayStartOnlyWithARepositoryTheBaseGameTheKeysAndTheToolsAndNoRunningBuild() throws {

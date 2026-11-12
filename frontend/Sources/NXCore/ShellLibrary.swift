@@ -19,6 +19,8 @@ package struct ShellLibrary: Codable, Equatable {
     package var bundleID = ShellLibrary.defaultBundleID
     package var team = ""
     package var games: [Game] = []
+    /// The selected shared runtime, mirrored independently of per-game build folders.
+    package var sharedRuntime: String? = nil
 
     /// The identifier a team falls back to when `org.nxnative.shell` is registered to another team (the same per-team variant the
     /// per-game install uses). Once stored in shell.json it stays: the app's Documents (game data, saves) belong to the identifier.

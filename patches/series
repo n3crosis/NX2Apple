@@ -90,3 +90,5 @@
 0133-ios-stub-probe-atrace-when-target-os-iphone-is-s.patch
 0134-ios-shell-load-transferred-payloads.patch
 0135-ios-add-opt-in-shared-runtime.patch
+0136-ios-wire-shared-runtime-build-pipeline.patch
+0137-ios-harden-shared-runtime-handoff.patch

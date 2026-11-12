@@ -88,6 +88,10 @@ package enum ShellInstall {
                    "DM_XCODE_DERIVED_DATA": derivedData(root: root),
                    "FONT_PY": python,
                    "PATH": path, "HOME": home, "USER": user, "LANG": "en_US.UTF-8"]
+        if frameworks.contains(where: { requiresSharedRuntime($0) }),
+           let runtime = ShellLibrary.load(root: root).sharedRuntime {
+            env["DM_SHELL_SHARED_RUNTIME"] = runtime
+        }
         if let tmp { env["TMPDIR"] = tmp }
         if let package { env["DM_SHELL_PACKAGE"] = package }
         return env

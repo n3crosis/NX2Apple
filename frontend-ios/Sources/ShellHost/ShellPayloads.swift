@@ -4,14 +4,21 @@ import PayloadKit
 /// Production payload intake. Tests can pass a store rooted at a temporary
 /// directory. Unsigned previews never advertise device payload support.
 public enum ShellPayloads {
-    public static func live(bundle: Bundle = .main, documents: URL? = nil) -> PayloadStore? {
+    public static func live(bundle: Bundle = .main, documents: URL? = nil,
+                            environment: HostEnvironment? = nil) -> PayloadStore? {
         guard let executable = bundle.executableURL, let bundleID = bundle.bundleIdentifier,
               let team = try? PayloadNativeCode.teamID(executable), !team.isEmpty else { return nil }
         let docs = documents ?? ShellHostConfig.defaultAppDataRoot().deletingLastPathComponent()
         let version = ProcessInfo.processInfo.operatingSystemVersion
+        let runtime = environment.flatMap { environment -> PayloadSharedRuntime? in
+            guard let descriptor = environment.sharedRuntime, let chain = environment.chain else { return nil }
+            let runtime = PayloadSharedRuntime(abi: descriptor.abi, profileABI: descriptor.profileABI,
+                                               runtimeVersion: descriptor.runtimeVersion, chain: chain)
+            return runtime.isWellFormed ? runtime : nil
+        }
         let host = PayloadCapabilities(bundleID: bundleID, teamID: team,
                                        osVersion: "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)",
-                                       executableSHA256: try? PayloadArchive.digest(executable))
+                                       executableSHA256: try? PayloadArchive.digest(executable), sharedRuntime: runtime)
         do {
             let store = try PayloadStore(documents: docs, host: host, metadataValidator: validateMetadata)
             if let error = store.startupWriteError { record("startup writes: \(error)") }
