@@ -1,4 +1,0 @@
-https://github.com/zhlynn/zsign
-Commit: 9299685bab7ef99827e06e5dfda93af747386590
-MIT, see LICENSE.
-Local adaptations: identity/CMS/mapping cleanup, quiet errors, bounded names, certificate/profile checks, Apple framework header casing, whitespace normalization, no signature resizing.

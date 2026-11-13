@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Linux bridge smoke test. Synthetic identity only, never Apple credentials.
-Usage: test_signer_bridge.py /tmp/lib-shell-signing.so /tmp/lib-shell-unavailable.so
+Usage: test_signer_bridge.py /tmp/lib-shell-signing.so
 Does not establish kernel trust or iOS loadability.
 """
 import ctypes
@@ -33,12 +33,9 @@ def load(path):
 
 
 def main():
-    enabled, unavailable = map(load, sys.argv[1:3])
+    enabled = load(sys.argv[1])
     assert enabled.nx_shell_signer_available() == 1
-    assert unavailable.nx_shell_signer_available() == 0
     message = ctypes.create_string_buffer(1024)
-    assert unavailable.nx_shell_sign_library(None, None, None, None, None, None, message, 1024) != 0
-    assert b"not included" in message.value
     with tempfile.TemporaryDirectory(prefix="shell-synthetic-signing-") as temporary:
         root = Path(temporary)
         openssl(root, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=Shell Synthetic Test CA", "-days", "1", "-keyout", "ca.key", "-out", "ca.pem")
@@ -115,7 +112,7 @@ def main():
         openssl(root, "cms", "-verify", "-binary", "-inform", "DER", "-in", "cms", "-content", "cd", "-noverify", "-out", "verified")
         assert (root / "verified").read_bytes() == cd
         assert sign() == 0, message.value # Re-sign existing CMS without resizing.
-    print("PASS: stub, team/password failures, malformed bounds, synthetic CMS signing/verification, re-signing")
+    print("PASS: external backend, team/password failures, malformed bounds, synthetic CMS signing/verification, re-signing")
 
 
 

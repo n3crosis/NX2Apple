@@ -55,7 +55,9 @@ public struct ShellSigningIdentityView: View {
             .navigationTitle(hostText("Signing identity"))
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(hostText("Done")) { clear(); dismiss() }.disabled(saving || loading)
+                    Button(hostText("Done")) { clear(); dismiss() }
+                        .disabled(saving || loading)
+                        .accessibilityIdentifier("signing.close")
                 }
             }
             .interactiveDismissDisabled(saving || picking || loading)
@@ -123,6 +125,9 @@ public struct ShellSigningIdentityView: View {
             saving = false
             if let outcome {
                 switch outcome {
+                case .hostSignatureUnavailable: message = hostText("This app's signing certificate could not be verified.")
+                case .signerMismatch: message = hostText("Choose the P12 certificate used to sign this app.")
+                case .certificateNotInProfile: message = hostText("The provisioning profile does not include this P12 certificate.")
                 case .expired: message = hostText("The provisioning profile is expired or invalid.")
                 case .invalid: message = hostText("Check the P12 password and use a profile from this app's signing team.")
                 default: message = hostText("The signing identity could not be saved. Unlock this device and try again.")

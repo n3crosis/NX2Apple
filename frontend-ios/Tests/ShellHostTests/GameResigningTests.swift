@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ShellUI
 @testable import ShellHost
 
 @Suite struct GameResigningTests {
@@ -57,4 +58,88 @@ import Testing
             }
         }
     }
+
+    @Test func changedSourceIsNotOverwrittenOrDeleted() throws {
+        let box = try FrameworkBox()
+        let framework = try fixture(box)
+        let movedOriginal = box.root.appendingPathComponent("original.framework")
+        let marker = framework.appendingPathComponent("external-import")
+        #expect(throws: ShellSigningError.self) {
+            try GameResigning.replace(framework: framework, hotRoot: box.frameworks, titleID: Fixtures.orbit) { _ in
+                try FileManager.default.moveItem(at: framework, to: movedOriginal)
+                try FileManager.default.copyItem(at: movedOriginal, to: framework)
+                try Data("new external import".utf8).write(to: marker)
+            }
+        }
+        #expect(try Data(contentsOf: marker) == Data("new external import".utf8))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: box.frameworks.path) == [framework.lastPathComponent])
+    }
+
+    @Test func sourceChangedToSymlinkIsNotExchanged() throws {
+        let box = try FrameworkBox()
+        let framework = try fixture(box)
+        let movedOriginal = box.root.appendingPathComponent("original.framework")
+        #expect(throws: ShellSigningError.self) {
+            try GameResigning.replace(framework: framework, hotRoot: box.frameworks, titleID: Fixtures.orbit) { _ in
+                try FileManager.default.moveItem(at: framework, to: movedOriginal)
+                try FileManager.default.createSymbolicLink(at: framework, withDestinationURL: movedOriginal)
+            }
+        }
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: framework.path) == movedOriginal.path)
+        #expect(FileManager.default.fileExists(atPath: movedOriginal.path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: box.frameworks.path) == [framework.lastPathComponent])
+    }
+
+    @MainActor @Test func cloudPromptReservesAllWindowsUntilCancelled() throws {
+        let box = try Sandbox()
+        let firstSettings = ShellSettingsStore(defaults: UserDefaults(suiteName: "signing-first-\(UUID().uuidString)")!)
+        let secondSettings = ShellSettingsStore(defaults: UserDefaults(suiteName: "signing-second-\(UUID().uuidString)")!)
+        let first = ShellHostModel(config: box.config(), shellSettings: firstSettings)
+        let second = ShellHostModel(config: box.config(), shellSettings: secondSettings)
+        // Isolate the session assertion from other tests' attempted launches.
+        let session = GameSigningSession()
+        session.register(first)
+        session.register(second)
+        #expect(!session.hasPendingLaunch)
+        second.cloudConflict = CloudSavePrompt(gameID: Fixtures.orbit, gameTitle: "Orbit")
+        #expect(session.hasPendingLaunch)
+        #expect(!first.canResignGames)
+        second.cancelCloudConflict()
+        #expect(!session.hasPendingLaunch)
+    }
+
+
+    @Test func hardLinkedSourceIsRejectedBeforeSigning() throws {
+        let box = try FrameworkBox()
+        let framework = try fixture(box)
+        let executable = framework.appendingPathComponent("DmGame")
+        let outsideLink = box.root.appendingPathComponent("linked-image")
+        try FileManager.default.linkItem(at: executable, to: outsideLink)
+        let original = try Data(contentsOf: executable)
+        #expect(throws: ShellSigningError.self) {
+            try GameResigning.replace(framework: framework, hotRoot: box.frameworks, titleID: Fixtures.orbit) { _ in
+                Issue.record("Must not sign hard-linked source files")
+            }
+        }
+        #expect(try Data(contentsOf: outsideLink) == original)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: box.frameworks.path) == [framework.lastPathComponent])
+    }
+
+    @Test func interruptedStagesAreCleanedWithoutRemovingUnrelatedFolders() throws {
+        let box = try FrameworkBox()
+        let framework = try fixture(box)
+        let stale = box.frameworks.appendingPathComponent(".resigning-" + Fixtures.orbit + "-" + UUID().uuidString)
+        let unrelated = box.frameworks.appendingPathComponent(".resigning-user-files")
+        try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: false)
+        #expect(throws: ShellSigningError.self) {
+            try GameResigning.replace(framework: framework, hotRoot: box.frameworks, titleID: Fixtures.orbit) { _ in
+                throw ShellSigningError.signature("test failure")
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: stale.path))
+        #expect(FileManager.default.fileExists(atPath: unrelated.path))
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: box.frameworks.path)) == Set([framework.lastPathComponent, unrelated.lastPathComponent]))
+    }
+
 }

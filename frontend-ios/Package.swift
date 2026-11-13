@@ -13,14 +13,16 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/krzyzanowskim/OpenSSL-Package.git",
-                 revision: "e61a288a9bc49a0358ab61614cac3d0553472254")
+                 revision: "e61a288a9bc49a0358ab61614cac3d0553472254"),
+        .package(url: "https://github.com/n3crosis/zsign.git",
+                 revision: "ccfe8f7fe273d63568ffb9e7fd494d95e3ddd812")
     ],
     targets: [
         // The signing backend is included in every shell build, not an opt-in stub.
-        .target(name: "NativeSigning", dependencies: [.product(name: "OpenSSL", package: "OpenSSL-Package")],
-                exclude: ["Vendor/LICENSE", "Vendor/UPSTREAM.txt"],
-                cxxSettings: [.define("NX_SHELL_ENABLE_ZSIGN"),
-                    .headerSearchPath("Vendor"), .headerSearchPath("Vendor/common")]),
+        .target(name: "NativeSigning", dependencies: [
+            .product(name: "zsignc", package: "zsign"),
+            .product(name: "OpenSSL", package: "OpenSSL-Package")
+        ]),
         .target(name: "ShellUI", resources: [.process("Resources")]),
         .target(name: "ShellControllers", dependencies: ["ShellUI"]),
         .target(name: "ShellHost", dependencies: ["ShellUI", "ShellControllers", "NativeSigning"], resources: [.process("Resources")]),

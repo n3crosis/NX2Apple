@@ -4,7 +4,9 @@ import Security
 /// Owner-imported signing material, kept in a non-synchronizing device-only
 /// Keychain item. No credentials or file locations belong in receipts or logs.
 public struct ShellSigningIdentityStore: Sendable {
-    public enum Failure: Error { case unavailable, missing, invalid, storage, locked, expired }
+    public enum Failure: Error { case unavailable, missing, invalid, storage, locked, expired
+        case hostSignatureUnavailable, signerMismatch, certificateNotInProfile
+    }
     private struct Credential: Codable {
         let pkcs12: Data
         let profile: Data
@@ -60,11 +62,9 @@ public struct ShellSigningIdentityStore: Sendable {
         guard let expiration = ProvisioningProfile.expiration(fromProfile: profile), expiration > Date() else {
             throw Failure.expired
         }
+        try ShellImportedIdentityValidation.validate(pkcs12: pkcs12, profile: profile, password: password,
+                                                     expectedTeamID: expectedTeamID, executable: Bundle.main.executableURL)
         let credential = Credential(pkcs12: pkcs12, profile: profile, password: password)
-        try withTemporaryIdentity(credential) { identity in
-            do { try ShellFrameworkResigner.validateIdentity(identity, expectedTeamID: expectedTeamID) }
-            catch { throw Failure.invalid }
-        }
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         let data = try encoder.encode(credential)

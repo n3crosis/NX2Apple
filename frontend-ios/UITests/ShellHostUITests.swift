@@ -12,6 +12,30 @@ import XCTest
         XCTAssertTrue(app.buttons["tile.\(id)"].waitForExistence(timeout: 10))
     }
 
+    func testSettingsOpensSigningImportAfterClosingItsMenu() {
+        launch(select: "0100000000010000")
+        app.buttons["shellSettings.open"].tap()
+        let signing = app.buttons["shellSettings.signing"]
+        XCTAssertTrue(signing.waitForExistence(timeout: 5))
+        if !signing.isHittable { app.swipeUp() }
+        signing.tap()
+        XCTAssertTrue(app.buttons["signing.chooseP12"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["signing.chooseProfile"].exists)
+        XCTAssertTrue(app.secureTextFields["signing.password"].exists)
+        XCTAssertFalse(app.buttons["signing.save"].isEnabled)
+        app.buttons["signing.close"].tap()
+        XCTAssertTrue(app.buttons["shellSettings.open"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["signing.chooseP12"].exists)
+    }
+
+    func testGameResigningChooserDoesNotOfferSigningIdentityImport() {
+        launch(select: "0100000000010000")
+        app.buttons["signing.open"].tap()
+        XCTAssertTrue(app.navigationBars["Re-sign imported game"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Signing identity"].exists)
+        XCTAssertFalse(app.buttons["signing.chooseP12"].exists)
+    }
+
     func testPlayableFixtureSaysLaunchingIsNotAvailable() {
         launch(select: "0100000000010000")
         XCTAssertEqual(app.staticTexts["hero.title"].label, "Orbit Fixture")

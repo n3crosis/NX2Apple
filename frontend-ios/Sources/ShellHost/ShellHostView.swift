@@ -51,6 +51,7 @@ public struct ShellHostView: View {
                     .disabled(model.launchingGame || model.resigningGame)
             }
             .sheet(isPresented: $showingSigning) { GameResigningView(model: model) }
+            .sheet(isPresented: $model.importingSigningIdentity) { ShellSigningIdentityView() }
             .sheet(item: $model.log) { LogView(log: $0) }
             .alert(Text(verbatim: hostText("Shell")), isPresented: Binding(get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })) {
                 Button(hostText("OK")) { model.notice = nil }

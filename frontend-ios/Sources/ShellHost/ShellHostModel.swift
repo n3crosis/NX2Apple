@@ -84,7 +84,7 @@ public struct ShellHostConfig: Sendable {
     public var signingNeedsRestart: Bool { signingSession.needsRestart }
 
     public var canResignGames: Bool {
-        !launchingGame && !resigningGame && !signingSession.attemptedLaunch && !signingNeedsRestart && cloudConflict == nil
+        !signingSession.hasPendingLaunch && !resigningGame && !signingSession.attemptedLaunch && !signingNeedsRestart && cloudConflict == nil
     }
 
     public var resignableGames: [CatalogueEntry] {
@@ -128,6 +128,7 @@ public struct ShellHostConfig: Sendable {
     public var cloudConflict: CloudSavePrompt?
     /// Mild heads-up when the app's provisioning profile expires within 48 hours.
     public private(set) var signingWarning: SigningWarning?
+    public var importingSigningIdentity = false
 
     public private(set) var globalPadMap = PadMap()
     public private(set) var padMerge = false
@@ -212,6 +213,7 @@ public struct ShellHostConfig: Sendable {
             guard let self, !self.signingWarningDismissed else { return }
             self.signingWarning = ProvisioningProfile.warning(expiration: expiration, now: clock())
         }
+        signingSession.register(self)
         reload()
         defaultsObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.defaultsDidChange() }
@@ -607,6 +609,7 @@ public struct ShellHostConfig: Sendable {
             onUseShellCloud: { [weak self] id in self?.useShellCloudSaves(id) },
             onClearShellData: { [weak self] in self?.clearShellData() },
             onClearShellCloud: { [weak self] in self?.clearShellCloud() },
+            onImportSigningIdentity: { [weak self] in self?.importingSigningIdentity = true },
             onGlobalPadMapChange: { [weak self] setting, value in
                 guard let self else { return }
                 if setting == "swapAB" { self.shellSettings.setPadSwapAB(value == "1") }
@@ -899,6 +902,10 @@ public struct ShellHostConfig: Sendable {
     func resolveCloudConflictNow(_ decision: CloudSaveDecision) async {
         if decision == .cancel {
             cancelCloudConflict()
+            return
+        }
+        guard !resigningGame, !signingNeedsRestart else {
+            notice = hostText("Restart the app before launching a game.")
             return
         }
         guard !launchingGame, let pending = pendingCloudLaunch else { return }

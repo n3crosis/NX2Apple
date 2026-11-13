@@ -283,6 +283,8 @@ public struct ShellActions {
     public var onBack: () -> Void
     public var onPickShellData: () -> Void
     public var onPickShellCloud: () -> Void
+    /// Opens the device-local P12 and provisioning-profile importer.
+    public var onImportSigningIdentity: () -> Void
     public var onUseShellCloud: (String) -> Void
     public var onClearShellData: () -> Void
     public var onClearShellCloud: () -> Void
@@ -305,6 +307,7 @@ public struct ShellActions {
                 onPickShellData: @escaping () -> Void = {}, onPickShellCloud: @escaping () -> Void = {},
                 onUseShellCloud: @escaping (String) -> Void = { _ in }, onClearShellData: @escaping () -> Void = {},
                 onClearShellCloud: @escaping () -> Void = {},
+                onImportSigningIdentity: @escaping () -> Void = {},
                 onGlobalPadMapChange: @escaping (String, String) -> Void = { _, _ in },
                 onGlobalPadMapReset: @escaping () -> Void = {}, onButtonTest: @escaping (Bool) -> Void = { _ in },
                 onPadMergeChange: @escaping (Bool) -> Void = { _ in },
@@ -326,6 +329,7 @@ public struct ShellActions {
         self.onUseShellCloud = onUseShellCloud
         self.onClearShellData = onClearShellData
         self.onClearShellCloud = onClearShellCloud
+        self.onImportSigningIdentity = onImportSigningIdentity
         self.onGlobalPadMapChange = onGlobalPadMapChange
         self.onGlobalPadMapReset = onGlobalPadMapReset
         self.onButtonTest = onButtonTest

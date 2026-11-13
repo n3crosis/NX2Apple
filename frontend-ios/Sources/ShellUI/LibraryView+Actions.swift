@@ -29,6 +29,7 @@ extension LibraryView {
         a.onUseShellCloud = { if !echo() { o.onUseShellCloud($0) } }
         a.onClearShellData = { if !echo() { o.onClearShellData() } }
         a.onClearShellCloud = { if !echo() { o.onClearShellCloud() } }
+        a.onImportSigningIdentity = { if !echo() { o.onImportSigningIdentity() } }
         a.onGlobalPadMapChange = { if !echo() { o.onGlobalPadMapChange($0, $1) } }
         a.onGlobalPadMapReset = { if !echo() { o.onGlobalPadMapReset() } }
         a.onPadMergeChange = { if !echo() { o.onPadMergeChange($0) } }

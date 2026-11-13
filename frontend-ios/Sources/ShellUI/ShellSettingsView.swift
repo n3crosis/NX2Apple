@@ -113,6 +113,14 @@ struct ShellSettingsView: View {
                 }
 
                 Section {
+                    Button(action: actions.onImportSigningIdentity) {
+                        Label(ShellStrings.text("Signing identity"), systemImage: "signature")
+                    }
+                    .accessibilityIdentifier("shellSettings.signing")
+                    .shellTarget("shs.signing", action: actions.onImportSigningIdentity)
+                }
+
+                Section {
                     TouchArrangeRow(arranged: !store.touchLayout.isEmpty || store.touchLayout.hasToggles,
                                     toggled: TouchLayout.Control.allCases.filter { store.touchLayout.toggles($0) }.map(\.title))
                 }

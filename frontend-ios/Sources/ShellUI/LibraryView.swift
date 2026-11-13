@@ -266,6 +266,10 @@ public struct LibraryView: View {
         routed.onPlay = { id in handOffMenu { actions.onPlay(id) } }
         routed.onShowLog = { id in handOffMenu { actions.onShowLog(id) } }
         routed.onAppUpdate = { handOffMenu { actions.onAppUpdate() } }
+        routed.onImportSigningIdentity = {
+            guard !fromSystemEcho else { return }
+            handOffMenu { actions.onImportSigningIdentity() }
+        }
         routed.onRestoreSaveBackup = { id in handOffMenu { actions.onRestoreSaveBackup(id) } }
         return routed
     }
