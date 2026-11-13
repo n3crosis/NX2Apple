@@ -16,18 +16,6 @@ final class ShellSigningIdentityTests: XCTestCase {
         XCTAssertThrowsError(try ShellSigningIdentityStore.readImportedFile(file, maximumBytes: Int.max))
     }
 
-    func testUnavailableBackendCannotSaveIdentity() throws {
-        guard !ShellFrameworkResigner.isAvailable else { throw XCTSkip("embedded signer enabled") }
-        let store = ShellSigningIdentityStore(bundleID: "test.shell." + UUID().uuidString)
-        XCTAssertThrowsError(try store.save(pkcs12: Data([0]), profile: Data([0]), password: "test-only",
-                                            expectedTeamID: "TESTTEAM01")) { error in
-            guard case ShellSigningIdentityStore.Failure.unavailable = error else {
-                return XCTFail("Expected unavailable signing backend")
-            }
-        }
-        XCTAssertFalse(store.hasIdentity)
-    }
-
     func testMissingIdentityCannotSign() {
         let store = ShellSigningIdentityStore(bundleID: "test.shell." + UUID().uuidString)
         XCTAssertThrowsError(try store.sign(framework: URL(fileURLWithPath: "/unused"), expectedTeamID: "TESTTEAM01"))

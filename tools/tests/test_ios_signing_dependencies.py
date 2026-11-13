@@ -26,9 +26,9 @@ class IOSSigningDependenciesTests(unittest.TestCase):
     def test_bridge_uses_only_public_external_api(self):
         bridge = (IOS / "Sources/NativeSigning/NativeSigning.cpp").read_text()
         self.assertIn("#include <ZSignLibrary.h>", bridge)
-        self.assertIn("return zsign_check_identity(pkcs12, password, profile, team, error, capacity);", bridge)
         self.assertIn("return zsign_sign_library(path, pkcs12, password, profile, team, identifier, error, capacity);", bridge)
-        self.assertIn("nx_shell_signer_available(void) { return 1; }", bridge)
+        self.assertNotIn("nx_shell_signer_available", bridge)
+        self.assertNotIn("nx_shell_check_identity", bridge)
         for internal in ("ZSignAsset", "ZMachO", "NX_SHELL_ENABLE_ZSIGN", "openssl.h"):
             self.assertNotIn(internal, bridge)
 

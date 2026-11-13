@@ -1079,7 +1079,6 @@
   "ios.host.signing.hostSignatureUnavailable": "无法验证此 App 的签名证书。",
   "ios.host.signing.signerMismatch": "请选择用于签名此 App 的 P12 证书。",
   "ios.host.signing.certificateNotInProfile": "描述文件中不包含此 P12 证书。",
-  "ios.host.signing.0048df8f771f": "此版本不包含原生签名后端。",
   "ios.host.signing.106389eb4d83": "已选择 P12 证书",
   "ios.host.signing.3a7d7b613e4b": "已选择预置描述文件",
   "ios.host.signing.3dbacf3f2bda": "请检查 P12 密码，并使用与此应用签名团队匹配的描述文件。",

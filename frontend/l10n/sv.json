@@ -1079,7 +1079,6 @@
   "ios.host.signing.hostSignatureUnavailable": "Det gick inte att verifiera appens signeringscertifikat.",
   "ios.host.signing.signerMismatch": "Välj det P12-certifikat som användes för att signera appen.",
   "ios.host.signing.certificateNotInProfile": "Provisioneringsprofilen innehåller inte det här P12-certifikatet.",
-  "ios.host.signing.0048df8f771f": "Den här versionen innehåller inte den inbyggda signeringsmotorn.",
   "ios.host.signing.106389eb4d83": "P12-certifikat valt",
   "ios.host.signing.3a7d7b613e4b": "Provisioneringsprofil vald",
   "ios.host.signing.3dbacf3f2bda": "Kontrollera P12-lösenordet och använd en profil från teamet som signerade den här appen.",

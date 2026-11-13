@@ -14,7 +14,8 @@ enum ShellImportedIdentityValidation {
             throw Failure.hostSignatureUnavailable
         }
         guard !expectedTeamID.isEmpty, expectedTeamID == hostTeam,
-              ProvisioningProfile.teamIdentifier(fromProfile: profile) == hostTeam else {
+              let provision = profileDictionary(profile),
+              let teams = provision["TeamIdentifier"] as? [String], teams.first == hostTeam else {
             throw Failure.invalid
         }
         var certificate = [UInt8](repeating: 0, count: 64 * 1024)
@@ -34,7 +35,7 @@ enum ShellImportedIdentityValidation {
         case 3: throw Failure.signerMismatch
         default: throw Failure.invalid
         }
-        guard let certificates = profileDictionary(profile)?["DeveloperCertificates"] as? [Data],
+        guard let certificates = provision["DeveloperCertificates"] as? [Data],
               certificates.contains(Data(certificate.prefix(certificateSize))) else {
             throw Failure.certificateNotInProfile
         }
@@ -75,15 +76,17 @@ enum ShellImportedIdentityValidation {
         return cms
     }
 
-    private static func profileDictionary(_ data: Data) -> [String: Any]? {
+    static func profileDictionary(_ data: Data) -> [String: Any]? {
         guard !data.isEmpty, data.count <= ProvisioningProfile.maxProfileBytes else { return nil }
-        if let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
-            return plist
+        let capacity = data.count
+        var content = [UInt8](repeating: 0, count: capacity)
+        var contentSize = 0
+        let result = data.withUnsafeBytes { profile in
+            nx_shell_copy_profile_content(profile.bindMemory(to: UInt8.self).baseAddress,
+                                          profile.count, &content, capacity, &contentSize)
         }
-        // Match ProvisioningProfile's bounded XML extraction from CMS profiles.
-        guard let start = data.range(of: Data("<?xml".utf8)),
-              let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex) else { return nil }
+        guard result == 0 else { return nil }
         return try? PropertyListSerialization.propertyList(
-            from: data.subdata(in: start.lowerBound..<end.upperBound), format: nil) as? [String: Any]
+            from: Data(content.prefix(contentSize)), format: nil) as? [String: Any]
     }
 }

@@ -32,15 +32,21 @@ import Observation
 
 /// Work only on a private sibling stage. Existing game bytes survive every signing failure.
 enum GameResigning {
+    static func isEligible(framework: URL, hotRoot: URL, titleID: String) -> Bool {
+        framework.isFileURL && hotRoot.isFileURL && isTitleID(titleID.uppercased()) &&
+            framework.pathExtension == "framework" &&
+            framework.deletingLastPathComponent().standardizedFileURL == hotRoot.standardizedFileURL &&
+            framework.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL == hotRoot.resolvingSymlinksInPath().standardizedFileURL
+    }
+
     static func replace(framework: URL, hotRoot: URL, titleID: String,
                       sign: (URL) throws -> Void) throws {
         let fm = FileManager.default
-        let expected = "DmGame\(titleID.uppercased()).framework"
-        guard isTitleID(titleID.uppercased()), framework.lastPathComponent == expected,
-              framework.deletingLastPathComponent().standardizedFileURL == hotRoot.standardizedFileURL,
-              framework.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL == hotRoot.resolvingSymlinksInPath().standardizedFileURL else {
+        guard isEligible(framework: framework, hotRoot: hotRoot, titleID: titleID) else {
             throw ShellSigningError.invalid("only imported games can be re-signed")
         }
+        // The catalogue supports imported frameworks with their own basenames.
+        let expected = framework.lastPathComponent
         let originalIdentity = try directoryIdentity(framework)
         // Validate before copying too, so symlinks cannot pull other files into the stage.
         _ = try ShellFrameworkResigner.nativeFiles(framework: framework)

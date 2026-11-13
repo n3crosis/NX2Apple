@@ -23,9 +23,6 @@ public struct ShellSigningIdentityView: View {
             Form {
                 Section {
                     Text(hostText("Your signing identity stays on this device. It must match the team that signed this app. Imported code still needs iOS approval."))
-                    if !ShellFrameworkResigner.isAvailable {
-                        Text(hostText("This build does not include the native signing backend.")).foregroundStyle(.secondary)
-                    }
                     Text(saved ? hostText("Signing identity saved on this device") : hostText("No signing identity saved"))
                 }
                 Section {
@@ -41,7 +38,7 @@ public struct ShellSigningIdentityView: View {
                     Button(hostText("Save signing identity")) { save() }
                         .disabled(pkcs12 == nil || profile == nil || saving || loading)
                         .accessibilityIdentifier("signing.save")
-                }.disabled(!ShellFrameworkResigner.isAvailable || saving || loading)
+                }.disabled(saving || loading)
                 if saved {
                     Section {
                         Button(hostText("Remove signing identity"), role: .destructive) { removing = true }

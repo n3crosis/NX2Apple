@@ -14,7 +14,6 @@ public struct ShellFrameworkResigner: Sendable {
         }
     }
 
-    public static var isAvailable: Bool { nx_shell_signer_available() != 0 }
     private let identity: @Sendable () throws -> Identity
 
     /// Caller supplies an explicitly imported local identity. No automatic key,
@@ -23,21 +22,7 @@ public struct ShellFrameworkResigner: Sendable {
         self.identity = identity
     }
 
-    /// Password/keypair/profile/team preflight. Does not prove Apple trust.
-    public static func validateIdentity(_ identity: Identity, expectedTeamID: String) throws {
-        guard isAvailable, identity.pkcs12.isFileURL, identity.profile.isFileURL,
-              !identity.password.contains("\0"), !expectedTeamID.isEmpty,
-              !expectedTeamID.contains("\0") else { throw ShellSigningError.signature("signing identity unavailable") }
-        var message = [CChar](repeating: 0, count: 1024)
-        let result = nx_shell_check_identity(identity.pkcs12.path, identity.password,
-                                               identity.profile.path, expectedTeamID, &message, message.count)
-        guard result == 0 else { throw ShellSigningError.signature("signing identity password, profile or team is invalid") }
-    }
-
     public func sign(framework: URL, expectedTeamID: String) throws {
-        guard Self.isAvailable else {
-            throw ShellSigningError.signature("embedded zsign/OpenSSL backend is unavailable")
-        }
         guard !expectedTeamID.isEmpty, !expectedTeamID.contains("\0") else { throw ShellSigningError.signature("missing host signing team") }
         let files = try Self.nativeFiles(framework: framework)
         let identifier = try Self.bundleIdentifier(framework: framework)
@@ -59,21 +44,32 @@ public struct ShellFrameworkResigner: Sendable {
         }
     }
 
-    /// Bound the metadata read itself, not only a prior file size check.
     static func bundleIdentifier(framework: URL) throws -> String {
+        let info = try bundleInfo(framework: framework)
+        guard let identifier = info["CFBundleIdentifier"] as? String, !identifier.isEmpty,
+              identifier.utf8.count <= 255, !identifier.contains("\0") else {
+            throw ShellSigningError.invalid("framework bundle identifier")
+        }
+        return identifier
+    }
+
+    /// Bound the metadata read itself, not only a prior file size check.
+    private static func bundleInfo(framework: URL) throws -> [String: Any] {
+        let data = try boundedMetadata(framework.appendingPathComponent("Info.plist"))
+        guard let info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            throw ShellSigningError.invalid("framework metadata")
+        }
+        return info
+    }
+
+    private static func boundedMetadata(_ url: URL) throws -> Data {
         let limit = 1 << 20
-        let url = framework.appendingPathComponent("Info.plist")
         guard (((try FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.intValue ?? (limit + 1)) <= limit else { throw ShellSigningError.invalid("framework metadata too large") }
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
         let data = try input.read(upToCount: limit + 1) ?? Data()
         guard data.count <= limit else { throw ShellSigningError.invalid("framework metadata too large") }
-        let info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
-        guard let identifier = info?["CFBundleIdentifier"] as? String, !identifier.isEmpty,
-              identifier.utf8.count <= 255, !identifier.contains("\0") else {
-            throw ShellSigningError.invalid("framework bundle identifier")
-        }
-        return identifier
+        return data
     }
 
     static func nativeFiles(framework: URL) throws -> [URL] {
@@ -104,19 +100,48 @@ public struct ShellFrameworkResigner: Sendable {
             }
         }
         try visit(framework)
-        guard !result.isEmpty else { throw ShellSigningError.invalid("framework has no native library") }
+        // An unrelated nested library must never stand in for the main image.
+        // Read metadata only after rejecting links throughout the tree.
+        let info = try bundleInfo(framework: framework)
+        let manifest = try GameManifest.parse(boundedMetadata(framework.appendingPathComponent("game.manifest.json")))
+        guard let executable = info["CFBundleExecutable"] as? String,
+              executable == manifest.frameworkExecutable,
+              !executable.isEmpty, executable != ".", executable != "..",
+              !executable.contains("/"), !executable.contains("\0"),
+              result.contains(framework.appendingPathComponent(executable)) else {
+            throw ShellSigningError.invalid("framework main executable is not a supported native library")
+        }
         return result.sorted { $0.path < $1.path }
     }
     static func isLibrary(_ url: URL) throws -> Bool {
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
         let bytes = [UInt8](try input.read(upToCount: 16) ?? Data())
-        guard bytes.count == 16 else { return false }
+        guard bytes.count >= 4 else { return false }
         func word(_ offset: Int) -> UInt32 {
             (0..<4).reduce(0) { $0 | UInt32(bytes[offset + $1]) << ($1 * 8) }
         }
-        guard word(0) == 0xfeedfacf, word(4) == 0x0100000c else { return false }
-        guard [UInt32(6), 8].contains(word(12)) else { throw ShellSigningError.invalid("not a library") }
+        let magic = word(0)
+        if [UInt32(0xcafebabe), 0xbebafeca, 0xcafebabf, 0xbfbafeca].contains(magic) {
+            // CAFEBABE also identifies Java class resources. Require a plausible
+            // fat header and a recognized host CPU before classifying it as code.
+            guard bytes.count >= 12 else { return false }
+            let swapped = magic == 0xbebafeca || magic == 0xbfbafeca
+            let architectures = swapped ? word(4).byteSwapped : word(4)
+            let cpu = swapped ? word(8).byteSwapped : word(8)
+            guard architectures > 0, architectures <= 4096,
+                  [UInt32(7), 12, 18].contains(cpu & 0x00ffffff) else { return false }
+            throw ShellSigningError.invalid("universal native images are not supported")
+        }
+        guard [UInt32(0xfeedface), 0xcefaedfe, 0xfeedfacf, 0xcffaedfe].contains(magic) else { return false }
+        guard bytes.count == 16 else { throw ShellSigningError.invalid("truncated native image") }
+        let swapped = magic == 0xcefaedfe || magic == 0xcffaedfe
+        let kind = swapped ? word(12).byteSwapped : word(12)
+        // Metal/GPU objects and other resources are not host-loadable libraries.
+        guard [UInt32(2), 6, 8].contains(kind) else { return false }
+        guard magic == 0xfeedfacf, word(4) == 0x0100000c, kind != 2 else {
+            throw ShellSigningError.invalid("unsupported native image")
+        }
         return true
     }
 

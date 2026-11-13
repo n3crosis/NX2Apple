@@ -39,6 +39,14 @@ final class ShellImportedIdentityValidationTests: XCTestCase {
         }
     }
 
+    func testPlainPlistsCannotBeImportedAsProvisioningProfiles() throws {
+        let profile: [String: Any] = ["TeamIdentifier": ["TESTTEAM01"], "DeveloperCertificates": [Data([1])]]
+        for format in [PropertyListSerialization.PropertyListFormat.xml, .binary] {
+            let data = try PropertyListSerialization.data(fromPropertyList: profile, format: format, options: 0)
+            XCTAssertNil(ShellImportedIdentityValidation.profileDictionary(data))
+        }
+    }
+
     func testAbsentHostCannotValidateImport() {
         XCTAssertThrowsError(try ShellImportedIdentityValidation.validate(
             pkcs12: Data([1]), profile: Data([1]), password: "", expectedTeamID: "TESTTEAM01", executable: nil)) {

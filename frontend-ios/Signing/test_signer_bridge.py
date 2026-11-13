@@ -27,14 +27,12 @@ def image():
 
 def load(path):
     library = ctypes.CDLL(str(Path(path).resolve()))
-    library.nx_shell_check_identity.argtypes = [ctypes.c_char_p] * 5 + [ctypes.c_size_t]
     library.nx_shell_sign_library.argtypes = [ctypes.c_char_p] * 7 + [ctypes.c_size_t]
     return library
 
 
 def main():
     enabled = load(sys.argv[1])
-    assert enabled.nx_shell_signer_available() == 1
     message = ctypes.create_string_buffer(1024)
     with tempfile.TemporaryDirectory(prefix="shell-synthetic-signing-") as temporary:
         root = Path(temporary)
@@ -45,20 +43,18 @@ def main():
         certificate = openssl(root, "x509", "-in", "leaf.pem", "-outform", "DER").stdout
         (root / "profile.plist").write_bytes(plistlib.dumps({"TeamIdentifier": ["TESTTEAM01"], "DeveloperCertificates": [certificate], "Entitlements": {"application-identifier": "TESTTEAM01.org.test"}}))
         openssl(root, "cms", "-sign", "-binary", "-nodetach", "-in", "profile.plist", "-signer", "leaf.pem", "-inkey", "leaf.key", "-outform", "DER", "-out", "profile.cms")
-        for team, password, expected in [(b"TESTTEAM01", b"test-only", 0), (b"OTHERTEAM1", b"test-only", -1), (b"TESTTEAM01", b"wrong", -1)]:
-            assert enabled.nx_shell_check_identity(str(root / "identity.p12").encode(), password,
-                str(root / "profile.cms").encode(), team, message, 1024) == expected
-        # A different valid P12 from the same team must not pass profile membership.
-        openssl(root, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=Other/OU=TESTTEAM01", "-days", "1", "-keyout", "other.key", "-out", "other.pem")
-        openssl(root, "pkcs12", "-export", "-inkey", "other.key", "-in", "other.pem", "-passout", "pass:test-only", "-out", "other.p12")
-        assert enabled.nx_shell_check_identity(str(root / "other.p12").encode(), b"test-only",
-            str(root / "profile.cms").encode(), b"TESTTEAM01", message, 1024) != 0
         native = root / "native"
 
-        def sign(team=b"TESTTEAM01", password=b"test-only"):
-            return enabled.nx_shell_sign_library(str(native).encode(), str(root / "identity.p12").encode(), password,
+        def sign(team=b"TESTTEAM01", password=b"test-only", p12="identity.p12"):
+            return enabled.nx_shell_sign_library(str(native).encode(), str(root / p12).encode(), password,
                 str(root / "profile.cms").encode(), team, b"org.test", message, 1024)
 
+        # Same team is insufficient when the certificate is absent from the profile.
+        openssl(root, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=Other/OU=TESTTEAM01", "-days", "1", "-keyout", "other.key", "-out", "other.pem")
+        openssl(root, "pkcs12", "-export", "-inkey", "other.key", "-in", "other.pem", "-passout", "pass:test-only", "-out", "other.p12")
+        native.write_bytes(image())
+        assert sign(p12="other.p12") != 0
+        assert native.read_bytes() == image()
         native.write_bytes(image())
         assert sign(b"OTHERTEAM1") != 0 and b"host team" in message.value
         assert native.read_bytes() == image()

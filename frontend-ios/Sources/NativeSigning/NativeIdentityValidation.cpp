@@ -10,6 +10,7 @@
 #include <openssl/x509.h>
 #include <openssl/provider.h>
 #endif
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -83,5 +84,25 @@ int nx_shell_validate_imported_identity(const unsigned char *pkcs12, size_t pkcs
     auto *output = certificate;
     if (i2d_X509(cert.get(), &output) != size) return 1;
     *certificate_size = static_cast<size_t>(size);
+    return 0;
+}
+
+int nx_shell_copy_profile_content(const unsigned char *profile, size_t profile_size,
+    unsigned char *content, size_t capacity, size_t *content_size) {
+    if (content_size) *content_size = 0;
+    if (!profile || !profile_size || profile_size > 4 * 1024 * 1024 ||
+        !content || !content_size) return 1;
+    const unsigned char *cursor = profile;
+    std::unique_ptr<CMS_ContentInfo, decltype(&CMS_ContentInfo_free)> cms(
+        d2i_CMS_ContentInfo(nullptr, &cursor, static_cast<long>(profile_size)), CMS_ContentInfo_free);
+    if (!cms || cursor != profile + profile_size ||
+        OBJ_obj2nid(CMS_get0_type(cms.get())) != NID_pkcs7_signed) return 1;
+    ASN1_OCTET_STRING **payload = CMS_get0_content(cms.get());
+    if (!payload || !*payload) return 1;
+    const int size = ASN1_STRING_length(*payload);
+    const unsigned char *bytes = ASN1_STRING_get0_data(*payload);
+    if (!bytes || size <= 0 || static_cast<size_t>(size) > capacity || size > 4 * 1024 * 1024) return 1;
+    std::memcpy(content, bytes, static_cast<size_t>(size));
+    *content_size = static_cast<size_t>(size);
     return 0;
 }

@@ -1,5 +1,6 @@
 """Portable import checks with disposable certificates, never real credentials."""
 import ctypes
+import plistlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -34,6 +35,10 @@ class ImportedIdentityValidationTests(unittest.TestCase):
             "-passout", "pass:disposable", "-out", "legacy.p12")
         run("openssl", "cms", "-sign", "-binary", "-in", "content", "-signer", "host.pem",
             "-inkey", "host.key", "-outform", "DER", "-out", "host.cms")
+        cls.profile_content = plistlib.dumps({"TeamIdentifier": ["TESTTEAM01"]})
+        (cls.directory / "profile.plist").write_bytes(cls.profile_content)
+        run("openssl", "cms", "-sign", "-binary", "-nodetach", "-in", "profile.plist",
+            "-signer", "host.pem", "-inkey", "host.key", "-outform", "DER", "-out", "profile.cms")
         run("openssl", "x509", "-in", "host.pem", "-outform", "DER", "-out", "host.der")
         run("openssl", "pkcs12", "-export", "-nokeys", "-in", "host.pem",
             "-passout", "pass:disposable", "-out", "keyless.p12")
@@ -43,6 +48,10 @@ class ImportedIdentityValidationTests(unittest.TestCase):
                                  ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p,
                                  ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
         cls.validate.restype = ctypes.c_int
+        cls.copy_content = cls.library.nx_shell_copy_profile_content
+        cls.copy_content.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p,
+                                     ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+        cls.copy_content.restype = ctypes.c_int
 
     @classmethod
     def tearDownClass(cls):
@@ -75,3 +84,22 @@ class ImportedIdentityValidationTests(unittest.TestCase):
         for cms in (b"", b"not cms", (self.directory / "host.cms").read_bytes() + b"extra"):
             with self.subTest(cms_length=len(cms)):
                 self.assertEqual(self.check(cms=cms), (2, b""))
+
+    def extract(self, profile, capacity=4 * 1024 * 1024):
+        output = ctypes.create_string_buffer(capacity)
+        length = ctypes.c_size_t()
+        result = self.copy_content(profile, len(profile), output, capacity, ctypes.byref(length))
+        return result, output.raw[:length.value]
+
+    def test_extracts_only_actual_embedded_cms_profile_content(self):
+        profile = (self.directory / "profile.cms").read_bytes()
+        self.assertEqual(self.extract(profile), (0, self.profile_content))
+        self.assertEqual(self.extract(profile, capacity=1), (1, b""))
+
+    def test_rejects_plain_truncated_trailing_and_detached_profiles(self):
+        profile = (self.directory / "profile.cms").read_bytes()
+        for data in (b"", self.profile_content, plistlib.dumps({}, fmt=plistlib.FMT_BINARY),
+                     b"junk" + self.profile_content, profile[:-1], profile + b"extra",
+                     (self.directory / "host.cms").read_bytes()):
+            with self.subTest(size=len(data)):
+                self.assertEqual(self.extract(data), (1, b""))

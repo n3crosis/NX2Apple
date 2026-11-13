@@ -1078,7 +1078,6 @@
   "ios.host.signing.hostSignatureUnavailable": "このアプリの署名証明書を検証できませんでした。",
   "ios.host.signing.signerMismatch": "このアプリの署名に使用したP12証明書を選択してください。",
   "ios.host.signing.certificateNotInProfile": "プロビジョニングプロファイルにこのP12証明書が含まれていません。",
-  "ios.host.signing.0048df8f771f": "このビルドにはネイティブ署名バックエンドが含まれていません。",
   "ios.host.signing.106389eb4d83": "P12証明書を選択済み",
   "ios.host.signing.3a7d7b613e4b": "プロビジョニングプロファイルを選択済み",
   "ios.host.signing.3dbacf3f2bda": "P12のパスワードを確認し、このアプリの署名チームのプロファイルを使用してください。",

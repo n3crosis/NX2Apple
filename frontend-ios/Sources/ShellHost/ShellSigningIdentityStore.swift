@@ -4,7 +4,7 @@ import Security
 /// Owner-imported signing material, kept in a non-synchronizing device-only
 /// Keychain item. No credentials or file locations belong in receipts or logs.
 public struct ShellSigningIdentityStore: Sendable {
-    public enum Failure: Error { case unavailable, missing, invalid, storage, locked, expired
+    public enum Failure: Error { case missing, invalid, storage, locked, expired
         case hostSignatureUnavailable, signerMismatch, certificateNotInProfile
     }
     private struct Credential: Codable {
@@ -55,7 +55,6 @@ public struct ShellSigningIdentityStore: Sendable {
     }
 
     public func save(pkcs12: Data, profile: Data, password: String, expectedTeamID: String) throws {
-        guard ShellFrameworkResigner.isAvailable else { throw Failure.unavailable }
         guard !pkcs12.isEmpty, pkcs12.count <= 1024 * 1024,
               !profile.isEmpty, profile.count <= ProvisioningProfile.maxProfileBytes,
               password.utf8.count <= 4096, !password.contains("\0") else { throw Failure.invalid }

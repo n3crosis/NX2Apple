@@ -1079,7 +1079,6 @@
   "ios.host.signing.hostSignatureUnavailable": "Le certificat de signature de cette app n’a pas pu être vérifié.",
   "ios.host.signing.signerMismatch": "Choisissez le certificat P12 utilisé pour signer cette app.",
   "ios.host.signing.certificateNotInProfile": "Le profil de provisionnement ne contient pas ce certificat P12.",
-  "ios.host.signing.0048df8f771f": "Cette version n’inclut pas le moteur de signature natif.",
   "ios.host.signing.106389eb4d83": "Certificat P12 sélectionné",
   "ios.host.signing.3a7d7b613e4b": "Profil de provisionnement sélectionné",
   "ios.host.signing.3dbacf3f2bda": "Vérifiez le mot de passe du P12 et utilisez un profil de l’équipe qui a signé cette app.",

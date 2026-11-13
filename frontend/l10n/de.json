@@ -1080,7 +1080,6 @@
   "ios.host.signing.hostSignatureUnavailable": "Das Signaturzertifikat dieser App konnte nicht überprüft werden.",
   "ios.host.signing.signerMismatch": "Wähle das P12-Zertifikat, mit dem diese App signiert wurde.",
   "ios.host.signing.certificateNotInProfile": "Das Bereitstellungsprofil enthält dieses P12-Zertifikat nicht.",
-  "ios.host.signing.0048df8f771f": "Dieser Build enthält kein natives Signier-Backend.",
   "ios.host.signing.106389eb4d83": "P12-Zertifikat ausgewählt",
   "ios.host.signing.3a7d7b613e4b": "Provisionierungsprofil ausgewählt",
   "ios.host.signing.3dbacf3f2bda": "Prüfe das P12-Passwort und verwende ein Profil vom Signierteam dieser App.",

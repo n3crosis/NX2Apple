@@ -4,8 +4,13 @@ import ShellUI
 @testable import ShellHost
 
 @Suite struct GameResigningTests {
-    private func fixture(_ box: FrameworkBox) throws -> URL {
-        let framework = try box.makeFramework(folder: "DmGame\(Fixtures.orbit).framework")
+    private func fixture(_ box: FrameworkBox, folder: String = "DmGame\(Fixtures.orbit).framework") throws -> URL {
+        let framework = try box.makeFramework(folder: folder)
+        let info = try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleExecutable": "DmGame",
+            "CFBundleIdentifier": "org.test.game"
+        ], format: .xml, options: 0)
+        try info.write(to: framework.appendingPathComponent("Info.plist"))
         // Header selection fixture, not a loadable or signed game.
         var bytes = Data()
         for word in [UInt32(0xfeedfacf), 0x0100000c, 0, 6] {
@@ -41,6 +46,35 @@ import ShellUI
         }
         #expect(try Data(contentsOf: framework.appendingPathComponent("DmGame")) == Data("signed copy".utf8))
         #expect(try FileManager.default.contentsOfDirectory(atPath: box.frameworks.path) == [framework.lastPathComponent])
+    }
+
+    @Test func noncanonicalImportedFrameworkKeepsItsName() throws {
+        let box = try FrameworkBox()
+        let framework = try fixture(box, folder: "OrbitImported.framework")
+        #expect(GameCatalogue.readFramework(at: framework).problem == nil)
+        #expect(GameResigning.isEligible(framework: framework, hotRoot: box.frameworks, titleID: Fixtures.orbit))
+        try GameResigning.replace(framework: framework, hotRoot: box.frameworks, titleID: Fixtures.orbit) { copy in
+            #expect(copy.lastPathComponent == framework.lastPathComponent)
+            #expect(copy != framework)
+            try Data("signed copy".utf8).write(to: copy.appendingPathComponent("DmGame"))
+        }
+        #expect(try Data(contentsOf: framework.appendingPathComponent("DmGame")) == Data("signed copy".utf8))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: box.frameworks.path) == ["OrbitImported.framework"])
+    }
+
+    @Test func eligibilityDoesNotExpandOutsideImportedFrameworks() throws {
+        let box = try FrameworkBox()
+        let framework = try fixture(box, folder: "OrbitImported.framework")
+        #expect(!GameResigning.isEligible(framework: framework, hotRoot: box.documents, titleID: Fixtures.orbit))
+        #expect(!GameResigning.isEligible(framework: framework, hotRoot: box.frameworks, titleID: "invalid"))
+        #expect(!GameResigning.isEligible(framework: box.frameworks.appendingPathComponent("OrbitImported.bundle"), hotRoot: box.frameworks, titleID: Fixtures.orbit))
+        let nested = box.frameworks.appendingPathComponent("nested/OrbitImported.framework")
+        #expect(!GameResigning.isEligible(framework: nested, hotRoot: box.frameworks, titleID: Fixtures.orbit))
+        #expect(throws: ShellSigningError.self) {
+            try GameResigning.replace(framework: framework, hotRoot: box.documents, titleID: Fixtures.orbit) { _ in
+                Issue.record("Must not sign a framework outside the configured import root")
+            }
+        }
     }
 
     @Test func embeddedFrameworkAndLinksAreRejected() throws {

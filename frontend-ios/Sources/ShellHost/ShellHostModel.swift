@@ -91,12 +91,12 @@ public struct ShellHostConfig: Sendable {
         guard let root = config.hotFrameworksRoot else { return [] }
         return entries.filter { entry in
             guard let url = entry.frameworkURL else { return false }
-            return url.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL
+            return GameResigning.isEligible(framework: url, hotRoot: root, titleID: entry.id)
         }
     }
 
     public func resignGame(_ id: String) async {
-        guard canResignGames, ShellFrameworkResigner.isAvailable,
+        guard canResignGames,
               let entry = resignableGames.first(where: { $0.id == id }),
               let framework = entry.frameworkURL, let root = config.hotFrameworksRoot,
               let executable = Bundle.main.executableURL,

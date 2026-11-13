@@ -3,7 +3,8 @@
 Import a P12 certificate/private key and provisioning profile through
 **Settings → Signing identity**. Import checks the private key, certificate dates,
 exact certificate match with the installed host executable's CMS signer, profile
-certificate membership and host/profile team. It is not a team-only match. Missing
+certificate membership and host/profile team. Profiles must contain CMS SignedData;
+raw plists are rejected. It is not a team-only match. Missing
 or ad-hoc host signatures are rejected. The identity is saved only in this
 device's non-synchronizing, unlocked-only Keychain. The library's
 **Re-sign imported game** button selects a writable imported game.
@@ -12,7 +13,8 @@ No Apple account login or network signing service is used.
 This integration supports the shell's existing `Documents/Frameworks` imports.
 It introduces no NXB format, does not require future NXB games to be frameworks,
 and does not renew the shell app or install a standalone IPA. Only thin arm64
-libraries with sufficient signature reservation are supported. There is no
+libraries with sufficient signature reservation are supported, including the main
+executable named by both the manifest and Info.plist. There is no
 ad-hoc, JIT, resizing or privilege fallback.
 
 Signing runs on a private copy off the UI thread. Every native image must pass
