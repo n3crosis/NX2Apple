@@ -1,6 +1,9 @@
 #ifndef NX_PAYLOAD_SIGNING_H
 #define NX_PAYLOAD_SIGNING_H
 #include <stddef.h>
+#include "NativeIdentityValidation.h"
+#include "NativeReplacement.h"
+#include "NativeValidation.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
