@@ -1255,6 +1255,9 @@ class LibraryAndSpaceTests(unittest.TestCase):
             c_name = sym.lstrip('_')
             self.assertRegex(combined_src, rf'\b{re.escape(c_name)}\b')
         for sym in re.findall(r'dlsym\([^,]+,\s*"([^"]+)"\)', main_src + '\n' + boot_hdr):
+            # FS-only descriptors are not part of the Windows legacy FH product.
+            if sym in {"dm_shared_runtime_descriptor", "dm_shared_game_descriptor"}:
+                continue
             self.assertIn(f'_{sym}', build_app.REQUIRED_DYLIB_SYMBOLS)
 
         # Verify shader_lib_real_path uses the synced engine's shader_lib.view(lib) for both .img and folder

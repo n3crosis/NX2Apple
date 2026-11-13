@@ -87,6 +87,13 @@ public struct EngineLaunchPlan: Equatable, Sendable {
             if isDirectory(ownPSO) { env["DM_PSO_BUNDLE"] = ownPSO.path } else if isDirectory(fwPSO) { env["DM_PSO_BUNDLE"] = fwPSO.path }
         }
 
+        // Routing is a manifest decision, never an env.txt or launcher-setting override.
+        // Write 0 for legacy games to clear a previous FS launch in the same process.
+        env["DM_SHARED_RUNTIME"] = manifest.loader == "FS" ? "1" : "0"
+        if manifest.loader == "FS" {
+            env["DM_PROFILE"] = fw.appendingPathComponent(manifest.profile).path
+        }
+
         return EngineLaunchPlan(
             environment: env,
             arguments: ["dmhost", fw.appendingPathComponent("dm", isDirectory: true).path] + manifest.modules,

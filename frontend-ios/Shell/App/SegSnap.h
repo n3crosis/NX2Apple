@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 typedef struct {
+    int complete; // A partial snapshot must never authorize a launch.
     uint8_t *data_ptr;
     uint8_t *data_snap;
     size_t data_sz;
@@ -47,6 +48,8 @@ static inline __attribute__((unused)) void dm_seg_snap_save_raw(
 ) {
     if (!s) return;
     memset(s, 0, sizeof *s);
+    s->complete = 1;
+    if ((data_sz && !data_ptr) || (common_sz && !common_ptr) || (bss_sz && !bss_ptr)) { s->complete = 0; return; }
     s->data_ptr = data_ptr;
     s->data_sz = data_sz;
     s->common_ptr = common_ptr;
@@ -57,15 +60,17 @@ static inline __attribute__((unused)) void dm_seg_snap_save_raw(
     if (s->data_ptr && s->data_sz) {
         s->data_snap = (uint8_t *)malloc(s->data_sz);
         if (s->data_snap) memcpy(s->data_snap, s->data_ptr, s->data_sz);
+        else s->complete = 0;
     }
     if (s->common_ptr && s->common_sz) {
         s->common_snap = (uint8_t *)malloc(s->common_sz);
         if (s->common_snap) memcpy(s->common_snap, s->common_ptr, s->common_sz);
+        else s->complete = 0;
     }
     if (s->bss_ptr && s->bss_sz) {
         uintptr_t b0 = (uintptr_t)s->bss_ptr;
         size_t sz = s->bss_sz;
-        if (sz > UINTPTR_MAX - b0) return;
+        if (sz > UINTPTR_MAX - b0) { s->complete = 0; return; }
         uintptr_t b1 = b0 + sz;
         size_t pg = (size_t)getpagesize();
         if (pg < 8U || (pg & (pg - 1U)) != 0) pg = 4096U;
@@ -108,10 +113,10 @@ static inline __attribute__((unused)) void dm_seg_snap_save_raw(
                     memcpy(&v, (const void *)a, sizeof v);
                     if (!v) continue;
                     if (s->bss_nnz == cap) {
-                        if (cap > SIZE_MAX / (2U * sizeof s->bss_nz[0])) break;
+                        if (cap > SIZE_MAX / (2U * sizeof s->bss_nz[0])) { s->complete = 0; break; }
                         size_t ncap = cap ? cap * 2U : 64U;
                         void *nb = realloc(s->bss_nz, ncap * sizeof s->bss_nz[0]);
-                        if (!nb) break;
+                        if (!nb) { s->complete = 0; break; }
                         s->bss_nz = nb;
                         cap = ncap;
                     }
@@ -144,7 +149,7 @@ static inline __attribute__((unused)) void dm_seg_snap_save(const struct mach_he
 }
 
 static inline __attribute__((unused)) void dm_seg_snap_restore(const DmSegSnap *s) {
-    if (!s) return;
+    if (!s || !s->complete) return;
     if (s->data_ptr && s->data_snap && s->data_sz) memcpy(s->data_ptr, s->data_snap, s->data_sz);
     if (s->common_ptr && s->common_snap && s->common_sz) memcpy(s->common_ptr, s->common_snap, s->common_sz);
     if (s->bss_ptr && s->bss_sz) {

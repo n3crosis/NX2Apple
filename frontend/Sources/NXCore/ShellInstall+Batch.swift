@@ -23,7 +23,8 @@ extension ShellInstaller {
     /// Signs and installs the shared app from the frameworks already built in `shell.json`, without rebuilding any game or
     /// transferring `romfs.img` game data.
     package func installBuilt(framework: String, titleID: String, name: String) -> Outcome {
-        let signed = signAndInstallApp(framework: framework, titleID: titleID, name: name)
+        let hasSharedGames = ShellLibrary.load(root: root).games.contains { ShellInstall.requiresSharedRuntime($0.framework) }
+        let signed = signAndInstallApp(framework: framework, titleID: titleID, name: name, allowHotInstall: !hasSharedGames)
         guard signed.outcome.ok else { return signed.outcome }
         var outcome = signed.outcome
         if !signed.notes.isEmpty {
@@ -75,7 +76,9 @@ extension ShellInstaller {
 
         var batchInstaller = self
         batchInstaller.pickedArtwork = last.pickedArtwork
-        let signed = batchInstaller.signAndInstallApp(framework: last.framework, titleID: last.titleID, name: last.name)
+        // The whole batch already declined hot delivery. Do not retry only its last FH game
+        // and leave an earlier FS game (and its shared runtime) uninstalled.
+        let signed = batchInstaller.signAndInstallApp(framework: last.framework, titleID: last.titleID, name: last.name, allowHotInstall: false)
         guard signed.outcome.ok else {
             if let before { try? before.write(to: URL(fileURLWithPath: stateFile), options: .atomic) }
             else if fm.fileExists(atPath: stateFile) { try? fm.removeItem(atPath: stateFile) }

@@ -57,6 +57,12 @@ extension ShellInstall {
     /// deleted or its stale framework was removed), or references a framework folder that is no longer on disk.
     package static func projectNeedsUpdate(root: String, games: [ShellLibrary.Game], fm: FileManager = .default) -> Bool {
         let expected = games.map(\.framework)
+        if expected.contains(where: { requiresSharedRuntime($0, fm: fm) }) {
+            let runtime = mirroredSharedRuntime(root: root)
+            let recorded = try? String(contentsOfFile: projectFolder(root: root) + "/runtime.txt", encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if recorded != runtime || !fm.fileExists(atPath: runtime) { return true }
+        }
         if let text = try? String(contentsOfFile: projectFrameworksFile(root: root), encoding: .utf8) {
             let recorded = text.split(whereSeparator: \.isNewline).compactMap { line -> String? in
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -82,6 +88,9 @@ extension ShellInstall {
         let keep = Set(games.map { ($0.framework as NSString).lastPathComponent })
         for app in [appPath(root: root), exportAppPath(root: root)] {
             let folder = app + "/Frameworks"
+            if !games.contains(where: { requiresSharedRuntime($0.framework, fm: fm) }) {
+                try? fm.removeItem(atPath: folder + "/DmSharedRuntime.framework")
+            }
             for item in (try? fm.contentsOfDirectory(atPath: folder)) ?? []
                 where item.hasPrefix("DmGame") && item.hasSuffix(".framework") && !keep.contains(item) {
                 try? fm.removeItem(atPath: folder + "/" + item)

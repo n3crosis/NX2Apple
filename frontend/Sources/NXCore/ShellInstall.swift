@@ -89,6 +89,9 @@ package enum ShellInstall {
                    "DM_XCODE_DERIVED_DATA": derivedData(root: root),
                    "FONT_PY": python,
                    "PATH": path, "HOME": home, "USER": user, "LANG": "en_US.UTF-8"]
+        if frameworks.contains(where: { requiresSharedRuntime($0) }) {
+            env["DM_SHELL_SHARED_RUNTIME"] = mirroredSharedRuntime(root: root)
+        }
         if let tmp { env["TMPDIR"] = tmp }
         if let package { env["DM_SHELL_PACKAGE"] = package }
         if let engine { env["DM_ENGINE_DIR"] = engine }
@@ -433,11 +436,11 @@ package struct ShellInstaller {
     }
 
     /// Steps 3 to 6: prepare the shared app's library and project, sign it, and install the app bundle on the device.
-    func signAndInstallApp(framework: String, titleID: String, name: String) -> (outcome: Outcome, notes: [String]) {
+    func signAndInstallApp(framework: String, titleID: String, name: String, allowHotInstall: Bool = true) -> (outcome: Outcome, notes: [String]) {
         guard FileManager.default.fileExists(atPath: framework) else {
             return (missingFramework(framework, name: name), [])
         }
-        if let hot = tryHotInstall(games: [HotGame(framework: framework, titleID: titleID, name: name, pickedArtwork: pickedArtwork)]) {
+        if allowHotInstall, let hot = tryHotInstall(games: [HotGame(framework: framework, titleID: titleID, name: name, pickedArtwork: pickedArtwork)]) {
             return hot
         }
         // A device this Mac never paired is found out now, not after the signing: nothing is built for it

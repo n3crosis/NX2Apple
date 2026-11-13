@@ -285,6 +285,22 @@ import XCTest
         XCTAssertEqual(calls.filter { $0.hasPrefix("xcodebuild") }.count, 0)
         XCTAssertEqual(try String(contentsOfFile: container + "/\(ShellLibrary.defaultBundleID)/Documents/games/\(thirdID)/romfs.img", encoding: .utf8), "three")
 
+        // An FS game before an FH game must take the full-install route for the whole batch.
+        let shared = try makeSignableFramework(id: secondID, name: "Shared Game", loader: "FS")
+        try write(ShellInstall.siblingSharedRuntime(shared) + "/DmSharedRuntime", "runtime")
+        try "".write(toFile: state + "/calls.txt", atomically: true, encoding: .utf8)
+        let mixed = inst.installBatch([
+            .init(framework: shared, titleID: secondID, name: "Shared Game", archive: arch2),
+            .init(framework: fw3, titleID: thirdID, name: "Game Three", archive: arch3),
+        ])
+        XCTAssertTrue(mixed.ok, mixed.message)
+        XCTAssertEqual(calls.filter { $0.hasPrefix("xcodebuild") }.count, 1)
+        XCTAssertFalse(calls.contains { $0.contains("Documents/Frameworks/.staging-") })
+        try "".write(toFile: state + "/calls.txt", atomically: true, encoding: .utf8)
+        XCTAssertTrue(inst.installBuilt(framework: fw3, titleID: thirdID, name: "Game Three").ok)
+        XCTAssertEqual(calls.filter { $0.hasPrefix("xcodebuild") }.count, 1)
+        _ = try makeSignableFramework(id: secondID, name: "Game Two")
+
         // Fallback Boundary 1: < 24h left on 7-day profile -> falls back to xcodebuild so profile is renewed.
         try writeDeviceBeacon(teamID: team, expiresIn: 12 * 3600, nowEpoch: nowEpoch)
         try "".write(toFile: state + "/calls.txt", atomically: true, encoding: .utf8)

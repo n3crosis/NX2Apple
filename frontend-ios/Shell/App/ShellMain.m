@@ -25,6 +25,7 @@
 #include "SegSnap.h"
 #include "ShellEngine.h"
 #include "ShellGlue.h"
+#include "SharedRuntimeChecks.h"
 #import "DmShell-Swift.h"
 
 _Static_assert(DM_SHELL_GLUE_VERSION == DM_GLUE_VERSION, "DM_SHELL_GLUE_VERSION must match DM_GLUE_VERSION");
@@ -44,6 +45,7 @@ static dm_glue_focus_fn g_focus;
 static UIViewController *g_library_vc;
 static char g_active_exe[1024];
 static const void *g_active_fbase;
+static const void *g_active_runtime_base;
 static DmFwSnap g_fw_snaps[64];
 static int g_nfw_snaps;
 static int g_boot_ok;
@@ -72,12 +74,12 @@ static void clear_game_env(void) {
     for (int i = 0; i < count; i++) unsetenv(names[i]);
 }
 
-static void save_framework_data(const void *fbase, const char *marker, const char *executable, time_t mtime) {
-    if (!fbase) return;
-    for (int i = 0; i < g_nfw_snaps; i++) if (g_fw_snaps[i].fbase == fbase) return;
-    if (g_nfw_snaps >= 64) return;
+static int save_framework_data(const void *fbase, const char *marker, const char *executable, time_t mtime) {
+    if (!fbase || fbase == (const void *)&_mh_execute_header) return 0;
+    for (int i = 0; i < g_nfw_snaps; i++) if (g_fw_snaps[i].fbase == fbase) return 1;
+    if (g_nfw_snaps >= 64) return 0;
     const struct mach_header_64 *mh = (const struct mach_header_64 *)fbase;
-    DmFwSnap *s = &g_fw_snaps[g_nfw_snaps++];
+    DmFwSnap *s = &g_fw_snaps[g_nfw_snaps];
     memset(s, 0, sizeof *s);
     s->fbase = fbase;
     if (marker) strlcpy(s->marker, marker, sizeof s->marker);
@@ -85,9 +87,16 @@ static void save_framework_data(const void *fbase, const char *marker, const cha
     s->mtime = mtime;
     dm_seg_snap_save(mh, "__DATA", &s->seg[0]);
     dm_seg_snap_save(mh, "__DATA_DIRTY", &s->seg[1]);
+    if (!s->seg[0].complete || !s->seg[1].complete) {
+        dm_seg_snap_free(&s->seg[0]); dm_seg_snap_free(&s->seg[1]);
+        memset(s, 0, sizeof *s);
+        return 0;
+    }
+    g_nfw_snaps++;
     fprintf(stderr, "shell: saved framework state for %p (__data=%#zx, __common=%#zx, __bss=%#zx with %zu initial non-zero words)\n",
             fbase, s->seg[0].data_sz + s->seg[1].data_sz, s->seg[0].common_sz + s->seg[1].common_sz,
             s->seg[0].bss_sz + s->seg[1].bss_sz, s->seg[0].bss_nnz + s->seg[1].bss_nnz);
+    return 1;
 }
 
 static void restore_framework_data(const void *fbase) {
@@ -106,11 +115,16 @@ void dm_shell_return_to_library(void) {
         char finished_exe[1024];
         strlcpy(finished_exe, g_active_exe, sizeof finished_exe);
         const void *fbase = g_active_fbase;
+        const void *runtime_base = g_active_runtime_base;
         g_active_fbase = NULL;
+        g_active_runtime_base = NULL;
         g_active_exe[0] = '\0';
         g_focus = NULL;
         g_present = NULL;
         g_boot_ok = 0;
+        // The runtime invokes this only after all guest/GPU/audio/host work has stopped.
+        // Restore host profile caches and game sections separately; neither is the shell.
+        if (runtime_base) restore_framework_data(runtime_base);
         if (fbase) restore_framework_data(fbase);
         UIWindow *window = nil;
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
@@ -256,6 +270,53 @@ static const char *register_external_signature(const char *executable) {
 }
 #endif
 
+// Discovery is metadata-only: opening the library must not initialize the runtime.
+static NSBundle *shared_runtime_bundle(void) {
+    NSString *path = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"DmSharedRuntime.framework"];
+    return path ? [NSBundle bundleWithPath:path] : nil;
+}
+
+int dm_shell_shared_runtime_abi(void) {
+    id value = [shared_runtime_bundle() objectForInfoDictionaryKey:@"DMSharedRuntimeABI"];
+    return [value isKindOfClass:NSNumber.class] ? [value intValue] : 0;
+}
+
+int dm_shell_shared_profile_abi(void) {
+    id value = [shared_runtime_bundle() objectForInfoDictionaryKey:@"DMSharedProfileABI"];
+    return [value isKindOfClass:NSNumber.class] ? [value intValue] : 0;
+}
+
+const char *dm_shell_shared_runtime_version(void) {
+    static NSString *version;
+    id value = [shared_runtime_bundle() objectForInfoDictionaryKey:@"DMSharedRuntimeVersion"];
+    version = [value isKindOfClass:NSString.class] && [value length] ? value : nil;
+    return version.UTF8String;
+}
+
+static const dm_shared_descriptor *shared_runtime(void **handle, const void **image) {
+    NSBundle *bundle = shared_runtime_bundle();
+    NSString *path = bundle.executablePath;
+    if (!path.length) return NULL;
+    void *h = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+    if (!h) return NULL;
+    const dm_shared_descriptor *d = dlsym(h, "dm_shared_runtime_descriptor");
+    Dl_info di;
+    if (!d || !dladdr(d, &di) || !di.dli_fbase ||
+        di.dli_fbase == (const void *)&_mh_execute_header || !di.dli_fname) return NULL;
+    // A dependency must not supply the descriptor or any of the entry points.
+    NSString *owner = [@(di.dli_fname) stringByResolvingSymlinksInPath];
+    if (![owner isEqualToString:[path stringByResolvingSymlinksInPath]]) return NULL;
+    const char *version = dm_shell_shared_runtime_version();
+    id chain = [bundle objectForInfoDictionaryKey:@"DMChain"];
+    if (!shared_descriptor_valid(d) || d->abi != (uint32_t)dm_shell_shared_runtime_abi() ||
+        d->profile_abi != (uint32_t)dm_shell_shared_profile_abi() ||
+        !version || strcmp(d->runtime_version, version) ||
+        ![chain isKindOfClass:NSString.class] || strcmp(d->shader_chain, [chain UTF8String])) return NULL;
+    *handle = h;
+    *image = di.dli_fbase;
+    return d; // Images remain loaded for process lifetime, as on the legacy FH path.
+}
+
 const char *dm_shell_start_game(const char *const *keys, const char *const *values, int n, const char *const *argv, int argc,
                                 const char *executable, const char *marker, const char *log_path, const char *cwd) {
     static char err[512];
@@ -287,6 +348,30 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
         return err;
     }
 #endif
+    // The native boundary independently verifies FS mode and its immutable profile.
+    // Legacy frameworks without FS metadata keep the existing FH route.
+    NSString *framework = [[@(executable) stringByDeletingLastPathComponent] stringByResolvingSymlinksInPath];
+    NSData *manifest_data = [NSData dataWithContentsOfFile:[framework stringByAppendingPathComponent:@"game.manifest.json"]];
+    id manifest_json = manifest_data ? [NSJSONSerialization JSONObjectWithData:manifest_data options:0 error:nil] : nil;
+    NSDictionary *manifest = [manifest_json isKindOfClass:NSDictionary.class] ? manifest_json : nil;
+    BOOL shared = [manifest[@"loader"] isEqual:@"FS"];
+    BOOL requested_shared = getenv("DM_SHARED_RUNTIME") && !strcmp(getenv("DM_SHARED_RUNTIME"), "1");
+    if (shared != requested_shared) return "The game's runtime mode does not match its manifest.";
+    NSDictionary *shared_manifest = nil;
+    if (shared) {
+        id descriptor = manifest[@"shared_runtime"];
+        id profile = manifest[@"profile"];
+        if (![descriptor isKindOfClass:NSDictionary.class] || ![profile isKindOfClass:NSString.class] ||
+            ![profile length] || [profile isAbsolutePath]) return "The shared runtime manifest is incomplete.";
+        shared_manifest = descriptor;
+        NSString *profile_path = [[framework stringByAppendingPathComponent:profile] stringByResolvingSymlinksInPath];
+        BOOL directory = NO;
+        if (![profile_path hasPrefix:[framework stringByAppendingString:@"/"]] ||
+            ![NSFileManager.defaultManager fileExistsAtPath:profile_path isDirectory:&directory] || directory ||
+            ![NSFileManager.defaultManager isReadableFileAtPath:profile_path])
+            return "The shared runtime game profile is missing or outside its framework.";
+        if (setenv("DM_PROFILE", profile_path.fileSystemRepresentation, 1)) return "Could not select the game's runtime profile.";
+    }
     // dlopen + dlsym + dladdr verify the framework's image and find its own host's entry points (ShellGlue.h, framework/ShellGlue.m),
     // after the environment is set and before the framework's host starts loading.
     void *h = dlopen(executable, RTLD_LAZY | RTLD_LOCAL);
@@ -303,10 +388,27 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
         fprintf(stderr, "[RED] boot: %s: %s\n", executable, err);
         return err;
     }
-    const int *ver = dlsym(h, "dm_glue_version");
-    dm_glue_start_fn start = (dm_glue_start_fn)dlsym(h, "dm_glue_start_game");
-    dm_glue_present_fn present = (dm_glue_present_fn)dlsym(h, "dm_glue_present_game");
-    dm_glue_focus_fn focus = (dm_glue_focus_fn)dlsym(h, "dm_glue_focus_event");
+    void *host = h;
+    const void *runtime_base = NULL;
+    if (shared) {
+        const dm_shared_descriptor *game = dlsym(h, "dm_shared_game_descriptor");
+        Dl_info game_desc_info;
+        const dm_shared_descriptor *runtime = shared_runtime(&host, &runtime_base);
+        if (!game || !dladdr(game, &game_desc_info) || game_desc_info.dli_fbase != info.dli_fbase ||
+            !runtime || runtime_base == info.dli_fbase || !shared_descriptors_match(game, runtime))
+            return "This game does not match the bundled shared runtime. Rebuild the game and shell together.";
+        id abi = shared_manifest[@"abi"], profile_abi = shared_manifest[@"profile_abi"];
+        id version = shared_manifest[@"runtime_version"], chain = manifest[@"chain"];
+        if (![abi isKindOfClass:NSNumber.class] || [abi unsignedIntValue] != game->abi ||
+            ![profile_abi isKindOfClass:NSNumber.class] || [profile_abi unsignedIntValue] != game->profile_abi ||
+            ![version isKindOfClass:NSString.class] || strcmp([version UTF8String], game->runtime_version) ||
+            ![chain isKindOfClass:NSString.class] || strcmp([chain UTF8String], game->shader_chain))
+            return "The shared runtime manifest does not match the game's compiled descriptor.";
+    }
+    const int *ver = dlsym(host, "dm_glue_version");
+    dm_glue_start_fn start = (dm_glue_start_fn)dlsym(host, "dm_glue_start_game");
+    dm_glue_present_fn present = (dm_glue_present_fn)dlsym(host, "dm_glue_present_game");
+    dm_glue_focus_fn focus = (dm_glue_focus_fn)dlsym(host, "dm_glue_focus_event");
     if (!ver || *ver != DM_GLUE_VERSION || !start || !present || !focus) {
         snprintf(err, sizeof err, "This game's framework was built without its host (glue version %d, expected %d). Rebuild the game in the launcher.",
                  ver ? *ver : 0, DM_GLUE_VERSION);
@@ -314,16 +416,27 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
         return err;
     }
     fprintf(stderr, "boot: game framework %s (handle %p, image base %p, glue v%d)\n", executable, h, info.dli_fbase, *ver);
-    save_framework_data(info.dli_fbase, marker, executable, exe_st.st_mtime);
+    if (runtime_base) {
+        Dl_info si, pi, fi, vi;
+        if (!dladdr((const void *)start, &si) || !dladdr((const void *)present, &pi) ||
+            !dladdr((const void *)focus, &fi) || !dladdr(ver, &vi) ||
+            si.dli_fbase != runtime_base || pi.dli_fbase != runtime_base ||
+            fi.dli_fbase != runtime_base || vi.dli_fbase != runtime_base)
+            return "The shared runtime entry points belong to a different image.";
+    }
+    if (!save_framework_data(info.dli_fbase, marker, executable, exe_st.st_mtime) || (runtime_base && !save_framework_data(runtime_base, NULL, NULL, 0)))
+        return "Could not preserve runtime state for a safe game switch.";
     const char *why = start(argv, argc, info.dli_fbase);
     if (why) {
         snprintf(err, sizeof err, "%s", why);
         fprintf(stderr, "[RED] boot: %s: %s\n", executable, err);
+        if (runtime_base) restore_framework_data(runtime_base);
         restore_framework_data(info.dli_fbase);
         return err;
     }
     strlcpy(g_active_exe, executable, sizeof g_active_exe);
     g_active_fbase = info.dli_fbase;
+    g_active_runtime_base = runtime_base;
     g_present = present;
     g_focus = focus;
     g_boot_ok = 1;

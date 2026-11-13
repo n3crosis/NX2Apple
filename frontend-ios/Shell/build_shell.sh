@@ -9,6 +9,7 @@
 # Environment:
 #   SHELL_DIR            the shell's project folder (required, outside frontend-ios: Gen/, the project, derived data)
 #   DM_SHELL_FRAMEWORKS  the games' framework folders, one per line (required, at least one, <folder>/DmGame<title ID>.framework)
+#   DM_SHELL_SHARED_RUNTIME optional DmSharedRuntime.framework required by FS games
 #   DM_BUNDLE_ID         the shell's bundle ID (default org.nxnative.shell). Keep it for the life of the install: the same ID installed
 #                        over the existing app keeps its Documents (game data, saves) when it is signed again after 7 days
 #   DM_TEAM_ID           the signing team for the prepared project (default 0000000000, a placeholder)
@@ -48,11 +49,38 @@ export DM_FORK_PATCHES=$(paste -sd, "$DM/fork_patches.txt" 2>/dev/null || true)
 DD=${DM_XCODE_DERIVED_DATA:-$S/dd}; mkdir -p "$DD" && DD=$(cd "$DD" && pwd)
 V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h"); [ -n "$V" ] || die "no DMSH_CHAIN in dm/gfx/nvn/dmsh_chain.h"
 
-# Every framework: a manifest with its own host (loader FH), its executable, a title ID of its own
+# Validate game frameworks and the optional shared runtime before touching generated resources.
 FWLIST=$S/frameworks.txt
-python3 -I - "$FWLIST" <<'PY' || die "the frameworks in DM_SHELL_FRAMEWORKS (above)"
-import json, os, sys
-out = sys.argv[1]
+export DM_SHELL_SHARED_RUNTIME=${DM_SHELL_SHARED_RUNTIME:-}
+python3 -I - "$FWLIST" "$S/runtime.txt" "$S/runtime-chain.txt" <<'PY' || die "the frameworks in DM_SHELL_FRAMEWORKS (above)"
+import json, os, plistlib, sys
+out, runtime_out, chain_out = sys.argv[1:]
+runtime_path = os.environ['DM_SHELL_SHARED_RUNTIME']
+runtime = None
+if runtime_path:
+    runtime_path = os.path.abspath(runtime_path)
+    if os.path.basename(runtime_path) != 'DmSharedRuntime.framework':
+        sys.exit('[RED] DM_SHELL_SHARED_RUNTIME must name DmSharedRuntime.framework')
+    if not os.path.isfile(os.path.join(runtime_path, 'DmSharedRuntime')):
+        sys.exit('[RED] shared runtime has no executable DmSharedRuntime')
+    try:
+        with open(os.path.join(runtime_path, 'shared-runtime.json'), encoding='utf-8') as f: runtime = json.load(f)
+        with open(os.path.join(runtime_path, 'Info.plist'), 'rb') as f: info = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException) as e:
+        sys.exit(f'[RED] unreadable shared runtime metadata: {e}')
+    if not isinstance(runtime, dict) or not isinstance(info, dict):
+        sys.exit('[RED] invalid shared runtime metadata')
+    if (type(runtime.get('abi')) is not int or runtime['abi'] != 1 or
+            type(runtime.get('profile_abi')) is not int or runtime['profile_abi'] != 1 or
+            not isinstance(runtime.get('runtime_version'), str) or not runtime['runtime_version'] or
+            not isinstance(runtime.get('chain'), str) or not runtime['chain'].startswith('b-')):
+        sys.exit('[RED] unsupported shared runtime ABI, version or chain')
+    for key, native in [('abi', 'DMSharedRuntimeABI'), ('profile_abi', 'DMSharedProfileABI'),
+                        ('runtime_version', 'DMSharedRuntimeVersion'), ('chain', 'DMChain')]:
+        if info.get(native) != runtime[key]:
+            sys.exit(f'[RED] shared runtime receipt disagrees with Info.plist: {key}')
+    if info.get('CFBundleExecutable') != 'DmSharedRuntime':
+        sys.exit('[RED] shared runtime Info.plist has the wrong executable')
 paths = [p.strip() for p in os.environ['DM_SHELL_FRAMEWORKS'].splitlines() if p.strip()]
 if not paths: sys.exit('[RED] no framework named')
 seen, rows = {}, []
@@ -63,12 +91,25 @@ for p in paths:
     name, exe, tid = m.get('framework'), m.get('framework_executable'), m.get('title_id', '')
     if os.path.basename(p) != name: sys.exit(f'[RED] {p}: the manifest names {name}')
     if not os.path.isfile(os.path.join(p, exe or '-')): sys.exit(f'[RED] {p}: no executable {exe} (build_ipa.sh DM_FRAMEWORK_ONLY builds it)')
-    if m.get('loader') != 'FH': sys.exit(f'[RED] {p}: built without a host in the framework (loader {m.get("loader")!r}). Rebuild this game for the shared app.')
+    if m.get('loader') == 'FS':
+        if runtime is None: sys.exit(f'[RED] {p}: FS requires DM_SHELL_SHARED_RUNTIME')
+        required = m.get('shared_runtime')
+        if not isinstance(required, dict): sys.exit(f'[RED] {p}: missing shared_runtime requirements')
+        for key in ('abi', 'profile_abi', 'runtime_version'):
+            if type(required.get(key)) is not type(runtime[key]) or required[key] != runtime[key]:
+                sys.exit(f'[RED] {p}: shared runtime {key} mismatch')
+        if m.get('chain') != runtime['chain']: sys.exit(f'[RED] {p}: shared runtime shader chain mismatch')
+    elif m.get('loader') != 'FH': sys.exit(f'[RED] {p}: built without a host in the framework (loader {m.get("loader")!r}). Rebuild this game for the shared app.')
     if tid in seen: sys.exit(f'[RED] {p}: title ID {tid} is already in the shell ({seen[tid]})')
     seen[tid] = p; rows.append((tid, p, m.get('name', '')))
 with open(out, 'w', encoding='utf-8') as f:
     for tid, p, name in rows: f.write(f'{tid}\t{p}\t{name}\n')
+with open(runtime_out, 'w', encoding='utf-8') as f: f.write(runtime_path)
+with open(chain_out, 'w', encoding='utf-8') as f: f.write(runtime['chain'][2:] if runtime else '')
 PY
+# The shell carries no shader engine of its own. Advertise the selected runtime
+# chain, not the checkout used to package it, so compatible older FS pairs work.
+if [ -s "$S/runtime-chain.txt" ]; then V=$(cat "$S/runtime-chain.txt") || die "runtime chain"; fi
 export GAME=$(head -1 "$FWLIST" | cut -f1)
 t "shell: $DM_SHELL_NAME ($DM_BUNDLE_ID), games: $(cut -f3 "$FWLIST" | paste -sd, -)"
 
@@ -89,16 +130,18 @@ printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "
 if [ "$MODE" = --prepare-xcode ] && [ -n "${DM_ENTITLEMENTS-default}" ]; then echo "CODE_SIGN_ENTITLEMENTS = Gen/DmShell.entitlements" >> Gen/dm.xcconfig
 elif [ "$MODE" = --prepare-xcode ]; then t "entitlements: none (DM_ENTITLEMENTS is empty): no Increased Memory Limit"; fi
 # The template with one embedded, unlinked framework per game where it says @FRAMEWORKS@
-python3 -I - "$SHELL_ROOT/project-shell.yml" "$FWLIST" project.yml <<'PY' || die "project.yml"
-import os, sys
-template, fwlist, out = sys.argv[1:]
+python3 -I - "$SHELL_ROOT/project-shell.yml" "$FWLIST" "$S/runtime.txt" project.yml <<'PY' || die "project.yml"
+import json, os, sys
+template, fwlist, runtime_file, out = sys.argv[1:]
 lines, done = [], False
 for line in open(template, encoding='utf-8').read().splitlines():
     if line.lstrip().startswith('# @FRAMEWORKS@'):
         pad = line[:len(line) - len(line.lstrip())]
-        for row in open(fwlist, encoding='utf-8').read().splitlines():
-            path = row.split('\t')[1]
-            lines += [f'{pad}- framework: "{path}"', f'{pad}  embed: true', f'{pad}  link: false', f'{pad}  codeSign: true']
+        paths = [row.split('\t')[1] for row in open(fwlist, encoding='utf-8').read().splitlines()]
+        runtime_path = open(runtime_file, encoding='utf-8').read()
+        if runtime_path: paths.append(runtime_path)
+        for path in paths:
+            lines += [f'{pad}- framework: {json.dumps(path)}', f'{pad}  embed: true', f'{pad}  link: false', f'{pad}  codeSign: true']
         done = True
         continue
     if line.lstrip().startswith('CFBundleLocalizations:'):
@@ -136,4 +179,7 @@ APP=$DD/Build/Products/Release-iphoneos/DmShell.app
 while IFS=$'\t' read -r tid path name; do
   fw=$APP/Frameworks/$(basename "$path"); [ -d "$fw" ] || die "the app does not embed $(basename "$path")"
 done < "$FWLIST"
+if [ -s "$S/runtime.txt" ]; then
+  [ -f "$APP/Frameworks/DmSharedRuntime.framework/DmSharedRuntime" ] || die "the app does not embed DmSharedRuntime.framework"
+fi
 t "done: $APP ($(du -sh "$APP" | cut -f1)), unsigned"

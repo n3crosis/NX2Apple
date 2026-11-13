@@ -108,6 +108,8 @@ extension ShellInstaller {
         let stateFile = ShellLibrary.stateFile(root: root)
         let before = fm.contents(atPath: stateFile)
         var replaced: [(mirror: String, previous: String)] = []
+        var runtimeReplacement: ShellRuntimeMirror?
+        defer { runtimeReplacement?.rollback() }
         func restoreLibrary() {
             do {
                 if let before { try before.write(to: URL(fileURLWithPath: stateFile), options: .atomic) }
@@ -128,6 +130,11 @@ extension ShellInstaller {
         var library = ShellLibrary.load(root: root)
         if !team.isEmpty { library.team = team }   // the export has no team: keep the one an install stored
         library.add(.init(titleID: titleID, name: name, framework: framework))
+        do {
+            runtimeReplacement = try ShellInstall.prepareSharedRuntime(root: root, library: library, preferredFramework: framework)
+        } catch {
+            return (nil, nil, Outcome(ok: false, message: fmt("shell.projectFailed", error.localizedDescription)), [])
+        }
         replaced = mirrorFrameworks(&library)
         library.dropMissing()
         let checked = leaveOutIncomplete(&library, titleID: titleID, name: name)   // ShellFrameworks.swift
@@ -171,6 +178,8 @@ extension ShellInstaller {
             restoreLibrary()
             return (nil, nil, Outcome(ok: false, message: fmt("shell.projectFailed", why)), [])
         }
+        runtimeReplacement?.commit()
+        runtimeReplacement = nil
         for (_, previous) in replaced { ShellInstall.discard(previous) }   // the script took the new frameworks
         ShellInstall.refreshProjectLinks(root: root, resources: resources, repo: repo)
         ShellInstall.writeProjectFrameworks(root: root, games: library.games)

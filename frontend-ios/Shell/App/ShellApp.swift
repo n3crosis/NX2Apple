@@ -18,6 +18,14 @@ struct EngineGameLauncher: GameLauncher {
     }
 
     @MainActor func launch(_ game: LaunchableGame) async throws {
+        if game.manifest.loader == "FS" {
+            let host = installedSharedRuntime()
+            let chain = (Bundle.main.infoDictionary?["DMChain"] as? String).map { "b-" + $0 }
+            guard let required = game.manifest.sharedRuntime, required.isWellFormed,
+                  host == required, chain == game.manifest.chain else {
+                throw Failure.engine("This game requires a different shared runtime. Update the app.")
+            }
+        }
         let fm = FileManager.default
         let documents = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let bundleURL = Bundle.main.bundleURL
@@ -45,6 +53,16 @@ struct EngineGameLauncher: GameLauncher {
     }
 }
 
+/// Native probes inspect the bundled runtime receipt without loading executable code.
+/// An older shell or missing/incompatible runtime never advertises FS support.
+private func installedSharedRuntime() -> SharedRuntimeDescriptor? {
+    let abi = dm_shell_shared_runtime_abi(), profileABI = dm_shell_shared_profile_abi()
+    guard abi == 1, profileABI == 1, let version = dm_shell_shared_runtime_version() else { return nil }
+    let descriptor = SharedRuntimeDescriptor(abi: Int(abi), profileABI: Int(profileABI),
+                                             runtimeVersion: String(cString: version))
+    return descriptor.isWellFormed ? descriptor : nil
+}
+
 /// `strdup`ed copies for the C call, freed after it (the engine copies what it keeps).
 private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafePointer<CChar>?>) -> R) -> R {
     let copies: [UnsafePointer<CChar>?] = strings.map { UnsafePointer(strdup($0)) }
@@ -66,7 +84,7 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
         let frameworks = Bundle.main.privateFrameworksURL ?? Bundle.main.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
         let config = ShellHostConfig(gamesRoot: frameworks, appDataRoot: ShellHostConfig.defaultAppDataRoot(),
                                      hotFrameworksRoot: ShellHostConfig.defaultHotFrameworksRoot(),
-                                     environment: HostEnvironment(chain: chain),
+                                     environment: HostEnvironment(chain: chain, sharedRuntime: installedSharedRuntime()),
                                      updateURL: URL(string: "https://github.com/LNPANDY/NX2Apple/releases"))
         let model = ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker())
         model.startControllers()
