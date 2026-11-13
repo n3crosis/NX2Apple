@@ -32,6 +32,10 @@ def load(path):
 
 
 def main():
+    # Source contract only; kernel acceptance still requires an Apple device.
+    launcher = (Path(__file__).resolve().parents[1] / "Shell/App/ShellMain.m").read_text()
+    assert "fsig.fs_blob_start = (void *)(uintptr_t)sig_off;" in launcher
+    assert "fsig.fs_file_start = (off_t)slice_off;" in launcher
     enabled = load(sys.argv[1])
     message = ctypes.create_string_buffer(1024)
     with tempfile.TemporaryDirectory(prefix="shell-synthetic-signing-") as temporary:

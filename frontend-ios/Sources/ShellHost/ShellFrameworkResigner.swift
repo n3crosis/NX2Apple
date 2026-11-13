@@ -4,35 +4,18 @@ import NativeSigning
 enum ShellSigningError: Error { case signature(String), invalid(String) }
 
 /// Re-signs private staged copies only. Never operate on an installed or loaded image.
-public struct ShellFrameworkResigner: Sendable {
-    public struct Identity: Sendable {
-        public let pkcs12: URL
-        public let profile: URL
-        public let password: String
-        public init(pkcs12: URL, profile: URL, password: String) {
-            self.pkcs12 = pkcs12; self.profile = profile; self.password = password
-        }
-    }
-
-    private let identity: @Sendable () throws -> Identity
-
-    /// Caller supplies an explicitly imported local identity. No automatic key,
-    /// profile, account, keychain or network discovery occurs here.
-    public init(identity: @escaping @Sendable () throws -> Identity) {
-        self.identity = identity
-    }
-
-    public func sign(framework: URL, expectedTeamID: String) throws {
+enum ShellFrameworkResigner {
+    static func sign(framework: URL, expectedTeamID: String,
+                     pkcs12: URL, profile: URL, password: String) throws {
         guard !expectedTeamID.isEmpty, !expectedTeamID.contains("\0") else { throw ShellSigningError.signature("missing host signing team") }
         let files = try Self.nativeFiles(framework: framework)
         let identifier = try Self.bundleIdentifier(framework: framework)
-        let credentials = try identity()
-        guard credentials.pkcs12.isFileURL, credentials.profile.isFileURL,
-              !credentials.password.contains("\0") else { throw ShellSigningError.signature("invalid local identity") }
+        guard pkcs12.isFileURL, profile.isFileURL,
+              !password.contains("\0") else { throw ShellSigningError.signature("invalid local identity") }
         for file in files {
             var message = [CChar](repeating: 0, count: 1024)
-            let result = nx_shell_sign_library(file.path, credentials.pkcs12.path, credentials.password,
-                                                credentials.profile.path, expectedTeamID, identifier,
+            let result = nx_shell_sign_library(file.path, pkcs12.path, password,
+                                                profile.path, expectedTeamID, identifier,
                                                 &message, message.count)
             guard result == 0 else {
                 throw ShellSigningError.signature(String(decoding: message.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self))

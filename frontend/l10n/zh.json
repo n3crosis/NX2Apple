@@ -1096,7 +1096,6 @@
   "ios.host.signing.df5be8ef91e3": "无法移除签名身份。",
   "ios.host.signing.df87ce798f80": "选择 P12 证书",
   "ios.host.signing.e0071108dc7c": "预置描述文件已过期或无效。",
-  "ios.host.signing.ee5d0075692e": "此应用没有可用的签名团队。",
   "ios.host.signing.f08482ecca9e": "P12 密码",
   "ios.host.ok": "好",
   "ios.host.oneAdditionalContentPack": "1 个附加内容包",

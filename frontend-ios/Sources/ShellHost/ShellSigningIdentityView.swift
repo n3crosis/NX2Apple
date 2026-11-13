@@ -101,12 +101,7 @@ public struct ShellSigningIdentityView: View {
     }
 
     private func save() {
-        guard let pkcs12, let profile, !saving,
-              let executable = Bundle.main.executableURL,
-              let team = FrameworkSignature.inspect(executable: executable)?.teamID, !team.isEmpty else {
-            message = hostText("This app has no usable signing team.")
-            return
-        }
+        guard let pkcs12, let profile, !saving else { return }
         saving = true
         let enteredPassword = password
         password = ""
@@ -114,7 +109,7 @@ public struct ShellSigningIdentityView: View {
         Task {
             let outcome = await Task.detached(priority: .userInitiated) { () -> ShellSigningIdentityStore.Failure? in
                 do {
-                    try identityStore.save(pkcs12: pkcs12, profile: profile, password: enteredPassword, expectedTeamID: team)
+                    try identityStore.save(pkcs12: pkcs12, profile: profile, password: enteredPassword)
                     return nil
                 } catch let error as ShellSigningIdentityStore.Failure { return error }
                 catch { return .storage }

@@ -54,16 +54,12 @@ public struct ShellSigningIdentityStore: Sendable {
         return try result.get()
     }
 
-    public func save(pkcs12: Data, profile: Data, password: String, expectedTeamID: String) throws {
+    public func save(pkcs12: Data, profile: Data, password: String) throws {
         guard !pkcs12.isEmpty, pkcs12.count <= 1024 * 1024,
               !profile.isEmpty, profile.count <= ProvisioningProfile.maxProfileBytes,
               password.utf8.count <= 4096, !password.contains("\0") else { throw Failure.invalid }
-        guard let expiration = ShellImportedIdentityValidation.profileDictionary(profile)?["ExpirationDate"] as? Date,
-              expiration > Date() else {
-            throw Failure.expired
-        }
         try ShellImportedIdentityValidation.validate(pkcs12: pkcs12, profile: profile, password: password,
-                                                     expectedTeamID: expectedTeamID, executable: Bundle.main.executableURL)
+                                                     executable: Bundle.main.executableURL)
         let credential = Credential(pkcs12: pkcs12, profile: profile, password: password)
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
@@ -80,15 +76,6 @@ public struct ShellSigningIdentityStore: Sendable {
     public func remove() throws {
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw Failure.storage }
-    }
-
-    /// The entire synchronous signing operation owns protected temporary files.
-    /// Nothing is materialized in Documents, the import stage, or a shared group.
-    public func sign(framework: URL, expectedTeamID: String) throws {
-        let credential = try loadCredential()
-        try withTemporaryIdentity(credential) { identity in
-            try ShellFrameworkResigner(identity: { identity }).sign(framework: framework, expectedTeamID: expectedTeamID)
-        }
     }
 
     private func loadCredential() throws -> Credential {
@@ -109,8 +96,10 @@ public struct ShellSigningIdentityStore: Sendable {
         return credential
     }
 
-    private func withTemporaryIdentity<T>(_ credential: Credential,
-                                          operation: (ShellFrameworkResigner.Identity) throws -> T) throws -> T {
+    /// The entire synchronous signing operation owns protected temporary files.
+    /// Nothing is materialized in Documents, the import stage, or a shared group.
+    public func sign(framework: URL, expectedTeamID: String) throws {
+        let credential = try loadCredential()
         Self.temporaryLock.lock()
         defer { Self.temporaryLock.unlock() }
         let fm = FileManager.default
@@ -143,6 +132,7 @@ public struct ShellSigningIdentityStore: Sendable {
         try credential.pkcs12.write(to: p12, options: options)
         try credential.profile.write(to: profile, options: options)
         for file in [p12, profile] { try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
-        return try operation(.init(pkcs12: p12, profile: profile, password: credential.password))
+        try ShellFrameworkResigner.sign(framework: framework, expectedTeamID: expectedTeamID,
+                                        pkcs12: p12, profile: profile, password: credential.password)
     }
 }

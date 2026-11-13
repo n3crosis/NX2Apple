@@ -1096,7 +1096,6 @@
   "ios.host.signing.df5be8ef91e3": "No se ha podido eliminar la identidad de firma.",
   "ios.host.signing.df87ce798f80": "Elegir certificado P12",
   "ios.host.signing.e0071108dc7c": "El perfil de aprovisionamiento ha caducado o no es válido.",
-  "ios.host.signing.ee5d0075692e": "Esta app no tiene un equipo de firma válido.",
   "ios.host.signing.f08482ecca9e": "Contraseña del P12",
   "ios.host.ok": "OK",
   "ios.host.oneAdditionalContentPack": "1 paquete de contenido adicional",

@@ -65,7 +65,7 @@ the matching checkout and `ZSIGN_LIBRARY` to that shared library:
 V=frontend-ios/Sources/NativeSigning
 c++ -std=c++17 -fPIC -shared -I"$V/include" -I"$ZSIGN/src/include" "$V/NativeSigning.cpp" "$ZSIGN_LIBRARY" -Wl,-rpath,"$(dirname "$ZSIGN_LIBRARY")" -o /tmp/lib-shell-signing.so
 python3 frontend-ios/Signing/test_signer_bridge.py /tmp/lib-shell-signing.so
-python3 -m unittest discover -s tools/tests -p 'test_ios_signing_dependencies.py'
+python3 -m unittest discover -s tools/tests -p 'test_ios_identity_validation.py'
 ```
 
 There is no optional/unavailable signer build. A missing dependency is a build

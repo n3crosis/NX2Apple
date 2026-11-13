@@ -49,7 +49,7 @@ final class ShellImportedIdentityValidationTests: XCTestCase {
 
     func testAbsentHostCannotValidateImport() {
         XCTAssertThrowsError(try ShellImportedIdentityValidation.validate(
-            pkcs12: Data([1]), profile: Data([1]), password: "", expectedTeamID: "TESTTEAM01", executable: nil)) {
+            pkcs12: Data([1]), profile: Data([1]), password: "", executable: nil)) {
             guard case ShellSigningIdentityStore.Failure.hostSignatureUnavailable = $0 else {
                 return XCTFail("Expected missing installed signer")
             }

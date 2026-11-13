@@ -4,8 +4,7 @@ import NativeSigning
 /// Matches an import to the installed executable, not merely another certificate
 /// issued to the same team. This is not Apple trust or device authorization.
 enum ShellImportedIdentityValidation {
-    static func validate(pkcs12: Data, profile: Data, password: String,
-                         expectedTeamID: String, executable: URL?) throws {
+    static func validate(pkcs12: Data, profile: Data, password: String, executable: URL?) throws {
         typealias Failure = ShellSigningIdentityStore.Failure
         guard let executable,
               let signature = FrameworkSignature.inspect(executable: executable),
@@ -13,9 +12,11 @@ enum ShellImportedIdentityValidation {
               let cms = hostCMS(executable: executable, signature: signature) else {
             throw Failure.hostSignatureUnavailable
         }
-        guard !expectedTeamID.isEmpty, expectedTeamID == hostTeam,
-              let provision = profileDictionary(profile),
-              let teams = provision["TeamIdentifier"] as? [String], teams.first == hostTeam else {
+        guard let provision = profileDictionary(profile),
+              let expiration = provision["ExpirationDate"] as? Date, expiration > Date() else {
+            throw Failure.expired
+        }
+        guard let teams = provision["TeamIdentifier"] as? [String], teams.first == hostTeam else {
             throw Failure.invalid
         }
         var certificate = [UInt8](repeating: 0, count: 64 * 1024)

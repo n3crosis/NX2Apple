@@ -1096,7 +1096,6 @@
   "ios.host.signing.df5be8ef91e3": "Não foi possível remover a identidade de assinatura.",
   "ios.host.signing.df87ce798f80": "Escolher certificado P12",
   "ios.host.signing.e0071108dc7c": "O perfil de provisionamento expirou ou é inválido.",
-  "ios.host.signing.ee5d0075692e": "Este app não tem uma equipe de assinatura utilizável.",
   "ios.host.signing.f08482ecca9e": "Senha do P12",
   "ios.host.ok": "OK",
   "ios.host.oneAdditionalContentPack": "1 pacote de conteúdo adicional",

@@ -1096,7 +1096,6 @@
   "ios.host.signing.df5be8ef91e3": "서명 ID를 삭제하지 못했습니다.",
   "ios.host.signing.df87ce798f80": "P12 인증서 선택",
   "ios.host.signing.e0071108dc7c": "프로비저닝 프로파일이 만료되었거나 유효하지 않습니다.",
-  "ios.host.signing.ee5d0075692e": "이 앱에는 사용할 수 있는 서명 팀이 없습니다.",
   "ios.host.signing.f08482ecca9e": "P12 비밀번호",
   "ios.host.ok": "확인",
   "ios.host.oneAdditionalContentPack": "추가 콘텐츠 팩 1개",
