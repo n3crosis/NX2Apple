@@ -79,6 +79,51 @@ public struct ShellHostConfig: Sendable {
     public var log: LogPresentation?
     /// Play is preparing the game's resources or handing over to the engine.
     public private(set) var launchingGame = false
+    @ObservationIgnored private let signingSession = GameSigningSession.shared
+    public var resigningGame: Bool { signingSession.resigning }
+    public var signingNeedsRestart: Bool { signingSession.needsRestart }
+
+    public var canResignGames: Bool {
+        !launchingGame && !resigningGame && !signingSession.attemptedLaunch && !signingNeedsRestart && cloudConflict == nil
+    }
+
+    public var resignableGames: [CatalogueEntry] {
+        guard let root = config.hotFrameworksRoot else { return [] }
+        return entries.filter { entry in
+            guard let url = entry.frameworkURL else { return false }
+            return url.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL
+        }
+    }
+
+    public func resignGame(_ id: String) async {
+        guard canResignGames, ShellFrameworkResigner.isAvailable,
+              let entry = resignableGames.first(where: { $0.id == id }),
+              let framework = entry.frameworkURL, let root = config.hotFrameworksRoot,
+              let executable = Bundle.main.executableURL,
+              let team = FrameworkSignature.inspect(executable: executable)?.teamID, !team.isEmpty else {
+            notice = hostText("Restart the app before re-signing an imported game.")
+            return
+        }
+        signingSession.resigning = true
+        defer { signingSession.resigning = false }
+        let succeeded = await Task.detached(priority: .userInitiated) {
+            do {
+                try GameResigning.replace(framework: framework, hotRoot: root, titleID: id) { copy in
+                    try ShellSigningIdentityStore().sign(framework: copy, expectedTeamID: team)
+                }
+                return true
+            } catch { return false }
+        }.value
+        if succeeded {
+            // Reload the catalogue only after restart. No game code was loaded
+            // in this process before the atomic replacement.
+            signingSession.needsRestart = true
+            notice = hostText("Game re-signed. Close and reopen the app to use it. Your saves are unchanged.")
+        } else {
+            notice = hostText("Re-signing failed. Check your identity and profile. iOS must accept the signature. The installed game was not changed.")
+        }
+    }
+
     /// Cloud save conflict or unreadable-archive prompt awaiting the player's decision before launch.
     public var cloudConflict: CloudSavePrompt?
     /// Mild heads-up when the app's provisioning profile expires within 48 hours.
@@ -314,6 +359,7 @@ public struct ShellHostConfig: Sendable {
     /// Reads the games folder again and sorts the library (see `LibraryOrder`). Only this and the first load re-sort:
     /// a change to one game updates it in place.
     public func reload() {
+        guard !resigningGame, !signingNeedsRestart else { return }
         forgetCheckedRomfsImages()
         let scanned = GameCatalogue.scan(root: config.gamesRoot, hotRoot: config.hotFrameworksRoot).filter { !isDeleted($0) }
         let built = scanned.map(detail(for:))
@@ -723,6 +769,7 @@ public struct ShellHostConfig: Sendable {
     /// and cloud saves (those folders are the player's and are not touched) and when it was played, and takes the game off the
     /// list. The game's framework inside the app stays: see `GameDeletion`.
     public func deleteGame(_ id: String, saves: Bool) {
+        guard !resigningGame, !signingNeedsRestart else { return }
         guard let entry = entry(id) else { return }
         joinGeneration &+= 1
         joiningProgress.removeValue(forKey: id)
@@ -779,7 +826,7 @@ public struct ShellHostConfig: Sendable {
     }
 
     func playNow(_ id: String) async {
-        guard !launchingGame, cloudConflict == nil,
+        guard !launchingGame, !resigningGame, !signingNeedsRestart, cloudConflict == nil,
               let entry = entry(id), let manifest = entry.manifest, let framework = entry.frameworkURL,
               details.first(where: { $0.id == id })?.game.state == .playable else { return }
         cloudCheckGeneration &+= 1
@@ -924,6 +971,8 @@ public struct ShellHostConfig: Sendable {
     }
 
     private func finishLaunch(_ baseGame: LaunchableGame) async {
+        guard !resigningGame, !signingNeedsRestart else { return }
+        signingSession.attemptedLaunch = true
         var game = baseGame
         // Remembered when Play is triggered, even if the launcher then fails (the stub). The order changes at the next load.
         LastPlayedStore(defaults: config.defaults(game.titleID)).record(config.now())

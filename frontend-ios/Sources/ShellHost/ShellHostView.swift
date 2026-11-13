@@ -5,6 +5,7 @@ import ShellUI
 /// launch arguments of the demo (initial selection and so on) are not part of it.
 public struct ShellHostView: View {
     @Bindable private var model: ShellHostModel
+    @State private var showingSigning = false
     private let initialSelection: String?
     private let initialDetailOpen: Bool
 
@@ -20,9 +21,9 @@ public struct ShellHostView: View {
                     padMerge: model.padMerge, padSnapshot: model.padSnapshot,
                     signingWarning: model.signingWarning,
                     onDismissSigningWarning: { model.dismissSigningWarning() })
-            .disabled(model.launchingGame)
+            .disabled(model.launchingGame || model.resigningGame)
             .overlay {
-                if model.launchingGame {
+                if model.launchingGame || model.resigningGame {
                     ZStack {
                         Color.black.opacity(0.45).ignoresSafeArea()
                         ProgressView { Text("Preparing game…", bundle: .module) }
@@ -43,6 +44,13 @@ public struct ShellHostView: View {
                 .presentationDetents([.medium, .large])
                 .presentationBackground(ShellPalette.background)
             }
+            .safeAreaInset(edge: .bottom) {
+                Button(hostText("Re-sign imported game")) { showingSigning = true }
+                    .accessibilityIdentifier("signing.open")
+                    .buttonStyle(.bordered)
+                    .disabled(model.launchingGame || model.resigningGame)
+            }
+            .sheet(isPresented: $showingSigning) { GameResigningView(model: model) }
             .sheet(item: $model.log) { LogView(log: $0) }
             .alert(Text(verbatim: hostText("Shell")), isPresented: Binding(get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })) {
                 Button(hostText("OK")) { model.notice = nil }
