@@ -30,17 +30,6 @@ package struct TargetCard: View {
                 }
                 .padding(.horizontal, 4).padding(.top, 2)
             }
-            if build.target != BuildTarget.mac && !build.exportsOneGame {
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle(loc.t("sharedRuntime.title"), isOn: $build.sharedRuntime)
-                        .toggleStyle(LauncherSwitchStyle()).disabled(build.running)
-                    Text(loc.t("sharedRuntime.note"))
-                        .font(.manrope(12.5)).foregroundStyle(LauncherPalette.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(18)
-                .background(LauncherPalette.card, in: RoundedRectangle(cornerRadius: 14))
-            }
             // A Mac app runs on this Mac's GPU, which always decodes BC textures: the switch is the iPhone's only.
             if build.target != BuildTarget.mac {
                 VStack(spacing: 0) {

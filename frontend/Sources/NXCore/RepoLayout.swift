@@ -52,14 +52,6 @@ package enum RepoLayout {
         return text.contains("'--fallback-icon'") || text.contains("\"--fallback-icon\"")
     }
 
-    /// FS is opt-in and requires the matching pipeline and shared builder.
-    package static func supportsSharedRuntime(_ dir: String) -> Bool {
-        let root = EngineLayout.root(dir)
-        guard FileManager.default.fileExists(atPath: root + "/dm/ios/tools/build_shared_runtime.sh"),
-              let text = try? String(contentsOfFile: root + "/" + buildScript, encoding: .utf8) else { return false }
-        return text.contains("'--shared-runtime'") || text.contains("\"--shared-runtime\"")
-    }
-
     /// The checkout of this repository the app drives. A released .app ships on its own,
     /// so the path is not known at build time: look next to the app bundle, walk up from
     /// it, then fall back to a saved choice. A repository is identified by

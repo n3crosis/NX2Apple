@@ -1,14 +1,15 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Codex <codex@openai.com>
-Date: Fri, 13 Nov 2026 14:23:25 +0900
-Subject: [PATCH] ios: build opt-in shared runtime beside legacy FH games
+Date: Fri, 13 Nov 2026 14:41:24 +0900
+Subject: [PATCH] ios: share runtime for new shell games beside existing FH
+ games
 
-Reuse the current route C preparation for separate FS host and game images. Keep legacy FH as the default and retain runtime identity, profile isolation and paired product rollback.
+Reuse route C preparation for separate FS host and game images. New shell games always use the shared runtime, while existing FH games keep their embedded host.
 
 Front-ends: FS games need the matching shared runtime descriptor and shader chain in the existing shell loader.
 
 Upstream-Status: pending
-Reason: Opt-in shared runtime while preserving legacy FH builds and current fork shell integration.
+Reason: Shared runtime for new shell builds while preserving existing FH artifacts and current fork shell integration.
 Issue: none (owner-requested shared runtime work)
 
 ---
@@ -26,12 +27,12 @@ Issue: none (owner-requested shared runtime work)
  dm/ios/project-shared-runtime.yml            |  81 +++++++
  dm/ios/tests/test_objc_namespace.py          |   4 +
  dm/ios/tests/test_shared_runtime_build.py    | 170 +++++++++++++++
- dm/ios/tests/test_shared_runtime_pipeline.py | 162 ++++++++++++++
+ dm/ios/tests/test_shared_runtime_pipeline.py | 175 +++++++++++++++
  dm/ios/tools/build_shared_runtime.sh         |  21 ++
  dm/ios/tools/gen_objc_namespace.py           |   3 +
  dm/ios/tools/gen_shared_runtime.py           | 213 +++++++++++++++++++
- scripts/build_ipa_from_nsp.py                |  59 ++++-
- 19 files changed, 800 insertions(+), 2 deletions(-)
+ scripts/build_ipa_from_nsp.py                |  54 ++++-
+ 19 files changed, 808 insertions(+), 2 deletions(-)
  create mode 100644 dm/host/shared_profile.h
  create mode 100644 dm/ios/framework/SharedRuntime.c
  create mode 100644 dm/ios/framework/SharedRuntime.h
@@ -236,11 +237,11 @@ index 0000000..3a6a072
 +};
 diff --git a/dm/ios/framework/SharedRuntime.h b/dm/ios/framework/SharedRuntime.h
 new file mode 100644
-index 0000000..4216a45
+index 0000000..6481a9e
 --- /dev/null
 +++ b/dm/ios/framework/SharedRuntime.h
 @@ -0,0 +1,14 @@
-+// FS is opt-in. FH keeps its existing ShellGlue.h ABI and embedded host.
++// New shell games use FS. Existing FH keeps its existing ShellGlue.h ABI and embedded host.
 +#pragma once
 +#include <stdint.h>
 +#define DM_SHARED_RUNTIME_ABI 1u
@@ -573,10 +574,10 @@ index 0000000..4c4a99e
 +    unittest.main()
 diff --git a/dm/ios/tests/test_shared_runtime_pipeline.py b/dm/ios/tests/test_shared_runtime_pipeline.py
 new file mode 100644
-index 0000000..c501025
+index 0000000..9ad34ad
 --- /dev/null
 +++ b/dm/ios/tests/test_shared_runtime_pipeline.py
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,175 @@
 +"""Exercise FS pipeline orchestration without Xcode or game data."""
 +import ast
 +from pathlib import Path
@@ -726,27 +727,40 @@ index 0000000..c501025
 +        self.assertEqual(len(stages), 1)
 +        self.assertEqual((stages[0] / (old.name + '.previous') / 'legacy-only').read_text(), 'FH')
 +
-+    def test_flag_is_opt_in_and_requires_shell_framework(self):
-+        tree = ast.parse(SCRIPT.read_text())
++    def test_new_shell_builds_use_shared_runtime_without_a_choice_or_fallback(self):
 +        source = SCRIPT.read_text()
-+        call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and n.args
-+                    and isinstance(n.args[0], ast.Constant) and n.args[0].value == '--shared-runtime')
-+        self.assertEqual(next(k.value.value for k in call.keywords if k.arg == 'action'), 'store_true')
-+        self.assertIn("if args.shared_runtime and not shell_fw: raise BuildError", source)
-+        self.assertIn("if args.shared_runtime and programs: raise BuildError", source)
-+        self.assertIn("else:\n            run(['bash', repo / 'dm/ios/tools/build_ipa.sh'], logs / 'build_framework.log'", source)
++        tree = ast.parse(source)
++        self.assertNotIn('--shared-runtime', source)
++        self.assertNotIn('args.shared_runtime', source)
++        guard = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
++                     and ast.unparse(n.test) == 'shell_fw and programs')
++        check = compile(ast.Module(body=[guard], type_ignores=[]), str(SCRIPT), 'exec')
++        with self.assertRaisesRegex(ValueError, 'multi-program builds are not supported'):
++            exec(check, dict(shell_fw=Path('out'), programs={1: {}}, BuildError=ValueError))
++        exec(check, dict(shell_fw=Path('out'), programs=None, BuildError=ValueError))
++        exec(check, dict(shell_fw=None, programs={1: {}}, BuildError=ValueError))
++        shell_build = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
++                           and isinstance(n.test, ast.Name) and n.test.id == 'shell_fw'
++                           and any(isinstance(child, ast.Call)
++                                   and isinstance(child.func, ast.Name)
++                                   and child.func.id == 'build_shared_shell_framework'
++                                   for child in ast.walk(n)))
++        calls = [n.func.id for n in ast.walk(shell_build) if isinstance(n, ast.Call)
++                 and isinstance(n.func, ast.Name)]
++        self.assertIn('build_shared_shell_framework', calls)
++        self.assertNotIn('run', calls)
 +
 +
 +if __name__ == '__main__':
 +    unittest.main()
 diff --git a/dm/ios/tools/build_shared_runtime.sh b/dm/ios/tools/build_shared_runtime.sh
 new file mode 100755
-index 0000000..663d207
+index 0000000..345f241
 --- /dev/null
 +++ b/dm/ios/tools/build_shared_runtime.sh
 @@ -0,0 +1,21 @@
 +#!/bin/bash
-+# Opt-in FS build, using a DM_FRAMEWORK=1 tools/build_ipa.sh --prepare-xcode workspace.
++# FS shell build, using a DM_FRAMEWORK=1 tools/build_ipa.sh --prepare-xcode workspace.
 +# Usage: build_shared_runtime.sh WORKSPACE [--prepare-only]
 +# Produces unsigned frameworks in WORKSPACE/shared-build/Release-iphoneos.
 +set -eu
@@ -782,12 +796,12 @@ index a5a762b..b234cdf 100644
      return [f'_{name}' for name in names]
 diff --git a/dm/ios/tools/gen_shared_runtime.py b/dm/ios/tools/gen_shared_runtime.py
 new file mode 100755
-index 0000000..21ffa47
+index 0000000..ba751f4
 --- /dev/null
 +++ b/dm/ios/tools/gen_shared_runtime.py
 @@ -0,0 +1,213 @@
 +#!/usr/bin/env python3
-+"""Prepare opt-in FS targets from a DM_FRAMEWORK=1 --prepare-xcode workspace.
++"""Prepare shared-runtime targets from a DM_FRAMEWORK=1 --prepare-xcode workspace.
 +
 +Does not build, sign, install or modify the legacy project/manifest. Both targets
 +are unsigned; shell integration must embed DmSharedRuntime.framework exactly once.
@@ -1000,23 +1014,15 @@ index 0000000..21ffa47
 +if __name__ == '__main__':
 +    main()
 diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
-index 2522d3b..d7f1879 100755
+index 2522d3b..54ef482 100755
 --- a/scripts/build_ipa_from_nsp.py
 +++ b/scripts/build_ipa_from_nsp.py
-@@ -3400,6 +3400,7 @@ def parse_args(argv):
-                     'is copied to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app refuses an image of another version)')
-     ap.add_argument('--shader-files', action=argparse.BooleanOptionalAction, help='an NVN game\'s shader library goes into the IPA as its separate files, not as one file, for install tools that cannot copy '
-                     'a large file (AltServer: 2 GiB; the game files then need --romfs separate too) (default: the SHADER_FILES setting, off)')
-+    ap.add_argument('--shared-runtime', action='store_true', help='opt-in FS runtime for --shell-framework builds, leaving legacy FH builds unchanged')
-     ap.add_argument('--prepare-xcode', action='store_true', help='prepare a per-game Xcode project and add it to the shared workspace instead of packing an IPA (requires keeping extracted files)')
-     ap.add_argument('--framework', action='store_true', help='the game\'s modules go into DmIOS.app/Frameworks/DmGame.framework, which the app dlopens at launch (route C, docs/launcher-c-plan.md M1), instead of the executable; the IPA is otherwise the usual one')
-     ap.add_argument('--shell-framework', metavar='FOLDER', help='route C\'s shell (docs/launcher-c-plan.md M2): build only the game\'s framework, FOLDER/DmGame<title ID>.framework '
-@@ -3536,6 +3537,57 @@ def provisional_version(have, builds, requested, profile_root):
+@@ -3536,6 +3536,57 @@ def provisional_version(have, builds, requested, profile_root):
      return version
  
  
 +def build_shared_shell_framework(repo, work, destination, title_id, env, logs, on_line):
-+    """Reuse the prepared route-C workspace and opt-in FS builder, never a second importer."""
++    """Reuse the prepared route-C workspace and shared-runtime builder, never a second importer."""
 +    workspace = work / 'shared-xcode'
 +    prepared = dict(env, DM_FRAMEWORK='1', DM_FRAMEWORK_NAME='DmGame' + title_id.upper(),
 +                    DM_FRAMEWORK_ONLY='', DM_COPY_ROMFS='NO', DM_XCODE_PROJECT_DIR=str(workspace))
@@ -1069,31 +1075,20 @@ index 2522d3b..d7f1879 100755
  def main(args=None):
      args = args or parse_args([])
      PROG.mode = progress_mode(args.progress or PROGRESS)
-@@ -3560,6 +3612,7 @@ def main(args=None):
-     if mac and args.framework: raise BuildError(f'--framework builds the iPhone app\'s game framework: it cannot be combined with --platform {platform}')
-     shell_fw = Path(os.path.expanduser(args.shell_framework)).resolve() if args.shell_framework else None
-     if shell_fw and (mac or prepare_xcode or args.framework): raise BuildError('--shell-framework builds only the game framework for the shell: it cannot be combined with --platform mac / mac-app, --prepare-xcode or --framework')
-+    if args.shared_runtime and not shell_fw: raise BuildError('--shared-runtime requires --shell-framework')
-     if shell_fw and args.romfs == 'bundle': raise BuildError('--shell-framework keeps the game files separate (the shell takes them from Documents/games/<title ID>/): it cannot be combined with --romfs bundle')
-     if shell_fw: args.romfs = 'separate'; args.keep_extracted = True
-     if mac and not apple_silicon(): raise BuildError(f'--platform {platform} runs the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
-@@ -3825,6 +3878,7 @@ def main(args=None):
+@@ -3825,6 +3876,7 @@ def main(args=None):
      if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
          rmtree(work / 'tmp'); return {'row': (PROGRAM_INDEX, g.id, patched, rfs.source(game), ios, gfx), 'ex': ex, 'keep': keep}
      programs = other_programs(args, g)
-+    if args.shared_runtime and programs: raise BuildError('shared-runtime multi-program builds are not supported yet')
++    if shell_fw and programs: raise BuildError('shared-runtime multi-program builds are not supported yet')
      if programs and romfs_mode == 'separate': raise BuildError('a game of several programs keeps its files in the app (ROMFS / --romfs bundle): Documents holds one RomFS image, one program\'s')
      if not prepare_xcode and not shell_fw and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
      say('preparing the Xcode project' if prepare_xcode else f'building the game framework for the shell → {shell_fw}' if shell_fw else f'building the IPA → {out_ipa}')
-@@ -3856,7 +3910,10 @@ def main(args=None):
+@@ -3856,7 +3908,7 @@ def main(args=None):
          fw = shell_fw / f'DmGame{g.id.upper()}.framework'
          watch = IpaWatch(repo, work / 'ipa', fw)
          PROG.stage('game framework', poll=watch.poll, step='starting')
 -        run(['bash', repo / 'dm/ios/tools/build_ipa.sh'], logs / 'build_framework.log', env=ipa_env, on_line=watch.line)
-+        if args.shared_runtime:
-+            build_shared_shell_framework(repo, work, shell_fw, g.id, ipa_env, logs, watch.line)
-+        else:
-+            run(['bash', repo / 'dm/ios/tools/build_ipa.sh'], logs / 'build_framework.log', env=ipa_env, on_line=watch.line)
++        build_shared_shell_framework(repo, work, shell_fw, g.id, ipa_env, logs, watch.line)
          if not (fw / 'game.manifest.json').is_file(): raise BuildError(f'no game framework at {fw}')
          PROG.end(fw.name)
          rmtree(work / 'tmp')

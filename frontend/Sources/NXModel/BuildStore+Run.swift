@@ -62,14 +62,6 @@ extension BuildStore {
             return
         }
 
-        // A requested FS build must not silently become an FH build on an older engine.
-        if !sharedRuntimeArguments.isEmpty {
-            if nxbRun { fail(t("sharedRuntime.scriptOnly")); return }
-            guard RepoLayout.supportsSharedRuntime(repo.path) else {
-                fail(t("sharedRuntime.engineOld")); return
-            }
-        }
-
         // One folder when everything lives together; otherwise a staging folder of symlinks. A folder
         // that holds other games too (a ROMs folder with one file per game) is staged as well: the
         // script takes one game per folder and refuses one with several ("more than one game in the
@@ -193,7 +185,6 @@ extension BuildStore {
         } else {
             // Only the game's framework: the one shared app is made and signed after the script (installShell)
             args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam)
-            args += sharedRuntimeArguments
         }
         // The archive step packs whatever folder the build reported; without --work-dir that is the
         // script's default, which is the same workDir unless a separate output folder was chosen.

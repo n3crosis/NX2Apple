@@ -1,4 +1,4 @@
-// FS is opt-in. FH keeps its existing ShellGlue.h ABI and embedded host.
+// New shell games use FS. Existing FH games keep their ShellGlue.h ABI and embedded host.
 #pragma once
 #include <stdint.h>
 #define DM_SHARED_RUNTIME_ABI 1u
