@@ -1,5 +1,6 @@
 """Portable import checks with disposable certificates, never real credentials."""
 import ctypes
+import datetime
 import plistlib
 from pathlib import Path
 import shutil
@@ -35,10 +36,17 @@ class ImportedIdentityValidationTests(unittest.TestCase):
             "-passout", "pass:disposable", "-out", "legacy.p12")
         run("openssl", "cms", "-sign", "-binary", "-in", "content", "-signer", "host.pem",
             "-inkey", "host.key", "-outform", "DER", "-out", "host.cms")
-        cls.profile_content = plistlib.dumps({"TeamIdentifier": ["TESTTEAM01"]})
+        cls.profile_expiration = datetime.datetime(2099, 1, 2, 3, 4, 5)
+        cls.profile_content = plistlib.dumps({"TeamIdentifier": ["TESTTEAM01"],
+                                           "ExpirationDate": cls.profile_expiration})
         (cls.directory / "profile.plist").write_bytes(cls.profile_content)
         run("openssl", "cms", "-sign", "-binary", "-nodetach", "-in", "profile.plist",
             "-signer", "host.pem", "-inkey", "host.key", "-outform", "DER", "-out", "profile.cms")
+        binary = plistlib.dumps({"TeamIdentifier": ["TESTTEAM01"],
+                                 "ExpirationDate": cls.profile_expiration}, fmt=plistlib.FMT_BINARY)
+        (cls.directory / "binary.plist").write_bytes(binary)
+        run("openssl", "cms", "-sign", "-binary", "-nodetach", "-in", "binary.plist",
+            "-signer", "host.pem", "-inkey", "host.key", "-outform", "DER", "-out", "binary.cms")
         run("openssl", "x509", "-in", "host.pem", "-outform", "DER", "-out", "host.der")
         run("openssl", "pkcs12", "-export", "-nokeys", "-in", "host.pem",
             "-passout", "pass:disposable", "-out", "keyless.p12")
@@ -103,3 +111,10 @@ class ImportedIdentityValidationTests(unittest.TestCase):
                      (self.directory / "host.cms").read_bytes()):
             with self.subTest(size=len(data)):
                 self.assertEqual(self.extract(data), (1, b""))
+
+    def test_expiration_comes_from_xml_or_binary_cms_payload(self):
+        for name in ("profile.cms", "binary.cms"):
+            with self.subTest(name=name):
+                status, content = self.extract((self.directory / name).read_bytes())
+                self.assertEqual(status, 0)
+                self.assertEqual(plistlib.loads(content)["ExpirationDate"], self.profile_expiration)

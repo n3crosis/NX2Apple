@@ -58,7 +58,8 @@ public struct ShellSigningIdentityStore: Sendable {
         guard !pkcs12.isEmpty, pkcs12.count <= 1024 * 1024,
               !profile.isEmpty, profile.count <= ProvisioningProfile.maxProfileBytes,
               password.utf8.count <= 4096, !password.contains("\0") else { throw Failure.invalid }
-        guard let expiration = ProvisioningProfile.expiration(fromProfile: profile), expiration > Date() else {
+        guard let expiration = ShellImportedIdentityValidation.profileDictionary(profile)?["ExpirationDate"] as? Date,
+              expiration > Date() else {
             throw Failure.expired
         }
         try ShellImportedIdentityValidation.validate(pkcs12: pkcs12, profile: profile, password: password,
@@ -101,7 +102,8 @@ public struct ShellSigningIdentityStore: Sendable {
         let credential: Credential
         do { credential = try PropertyListDecoder().decode(Credential.self, from: data) }
         catch { throw Failure.invalid }
-        guard let expiration = ProvisioningProfile.expiration(fromProfile: credential.profile), expiration > Date() else {
+        guard let expiration = ShellImportedIdentityValidation.profileDictionary(credential.profile)?["ExpirationDate"] as? Date,
+              expiration > Date() else {
             throw Failure.expired
         }
         return credential
