@@ -1,0 +1,4 @@
+module NxkitBuilder {
+    header "NxkitBuilder.h"
+    export *
+}
