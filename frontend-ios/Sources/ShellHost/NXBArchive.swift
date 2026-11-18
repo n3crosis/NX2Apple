@@ -233,13 +233,26 @@ extension NXBArchive {
                       manifest: Data, proof: Data) throws {
         let output = try FileHandle(forWritingTo: destination)
         defer { try? output.close() }
+        try write(entries: reader.entries, files: files, manifest: manifest, proof: proof,
+                  read: { path, offset, count in
+                      try reader.read(reader.entries[path]!.start + offset, count)
+                  }, emit: { try output.write(contentsOf: $0) })
+        try output.synchronize()
+    }
+
+    /// The sink may be a file or a backpressured transport. It never owns an
+    /// archive-sized buffer. Offsets supplied to read are relative to each file.
+    static func write(entries: [String: Entry], files: [GamePackageManifest.File],
+                      manifest: Data, proof: Data?,
+                      read: (String, UInt64, Int) throws -> Data,
+                      emit sink: (Data) throws -> Void) throws {
         var position: UInt64 = 0
         var central = Data()
         func words(_ values: [(UInt64, Int)]) -> Data {
             Data(values.flatMap { value, count in (0..<count).map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) } })
         }
         func emit(_ data: Data) throws {
-            try output.write(contentsOf: data)
+            try sink(data)
             position += UInt64(data.count)
         }
         func entry(_ path: String, bytes: UInt64, crc: UInt32, executable: Bool,
@@ -260,17 +273,23 @@ extension NXBArchive {
             central.append(name); central.append(centralExtra)
             guard central.count <= directoryLimit else { throw GamePackageError.invalid("NXB directory size") }
         }
-        for (name, data) in [("nxb.json", manifest), ("nxb.signature.json", proof)] {
+        var metadata = [("nxb.json", manifest)]
+        if let proof { metadata.append(("nxb.signature.json", proof)) }
+        for (name, data) in metadata {
             try entry(name, bytes: UInt64(data.count), crc: checksum(data), executable: false) { try emit(data) }
         }
         for file in files {
-            let source = reader.entries[file.path]!
+            let source = entries[file.path]!
             try entry(file.path, bytes: source.bytes, crc: source.crc, executable: file.executable) {
-                var cursor = source.start, remaining = source.bytes
+                var cursor: UInt64 = 0
+                var remaining = source.bytes
                 var hash = SHA256(), crc: UInt32 = 0xffffffff
                 while remaining > 0 {
                     try Task.checkCancellation()
-                    let data = try reader.read(cursor, Int(min(remaining, UInt64(chunk))))
+                    let data = try read(file.path, cursor, Int(min(remaining, UInt64(chunk))))
+                    guard !data.isEmpty, UInt64(data.count) <= remaining else {
+                        throw GamePackageError.invalid("file length changed")
+                    }
                     hash.update(data: data); crc = updateCRC(crc, data)
                     try emit(data)
                     remaining -= UInt64(data.count); cursor += UInt64(data.count)
@@ -283,12 +302,11 @@ extension NXBArchive {
         }
         let directoryOffset = position
         try emit(central)
-        let endOffset = position, count = UInt64(files.count + 2)
+        let endOffset = position, count = UInt64(files.count + metadata.count)
         try emit(words([(0x06064b50, 4), (44, 8), (45, 2), (45, 2), (0, 4), (0, 4),
                         (count, 8), (count, 8), (UInt64(central.count), 8), (directoryOffset, 8)]))
         try emit(words([(0x07064b50, 4), (0, 4), (endOffset, 8), (1, 4)]))
         try emit(words([(0x06054b50, 4), (0, 2), (0, 2), (0xffff, 2), (0xffff, 2),
                         (0xffffffff, 4), (0xffffffff, 4), (0, 2)]))
-        try output.synchronize()
     }
 }

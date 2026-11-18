@@ -203,8 +203,28 @@ import Security
         let installed = try library.install(prepared, checkCompatibility: { _ in }) { executable in
             try Data([1, 2, 3]).write(to: executable)
         }
-        #expect(try Data(contentsOf: installed.archive) == Data(contentsOf: source))
+        #expect(!FileManager.default.fileExists(atPath: installed.archive.path))
+        #expect(try Data(contentsOf: installed.directory.appendingPathComponent("original.dylib")) == Data(repeating: 0, count: 32))
+        #expect(try Data(contentsOf: installed.runRoot.appendingPathComponent("nxgame.dylib")) == Data([1, 2, 3]))
+        // A streamed export authenticates the original code, not the local signature.
+        let output = root.appendingPathComponent("streamed.nxb")
+        #expect(FileManager.default.createFile(atPath: output.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: output)
+        try GamePackage.streamDirectory(installed.directory) { try handle.write(contentsOf: $0) }
+        try handle.close()
+        let roundTrip = try GamePackage.stage(output, in: root, allowUnsigned: true) { _ in }
+        defer { try? FileManager.default.removeItem(at: roundTrip.directory) }
+        #expect(try Data(contentsOf: roundTrip.directory.appendingPathComponent("run/nxgame.dylib")) == Data(repeating: 0, count: 32))
         #expect(library.entries().map(\.directory) == [installed.directory])
+        let isolated = try library.prepare(installed)
+        let activeData = installed.runRoot.appendingPathComponent("game.json")
+        let before = try Data(contentsOf: activeData)
+        try Data("changed".utf8).write(to: isolated.directory.appendingPathComponent("run/game.json"))
+        #expect(try Data(contentsOf: activeData) == before)
+        #expect(throws: GamePackageError.self) {
+            _ = try library.install(isolated, checkCompatibility: { _ in }, sign: { _ in })
+        }
+        library.discard(isolated)
         let replacement = try library.prepare(source)
         defer { library.discard(replacement) }
         #expect(throws: GamePackageError.self) {

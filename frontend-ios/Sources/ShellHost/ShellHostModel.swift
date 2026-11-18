@@ -1864,8 +1864,14 @@ extension ShellHostModel {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let output = directory.appendingPathComponent(entry.id + ".nxb")
             do {
-                try GamePackage.exportSigned(entry.archive, to: output) {
-                    try ShellSigningIdentityStore().signPackageManifest($0)
+                if FileManager.default.fileExists(atPath: entry.archive.path) {
+                    try GamePackage.exportSigned(entry.archive, to: output) {
+                        try ShellSigningIdentityStore().signPackageManifest($0)
+                    }
+                } else {
+                    try GamePackage.exportDirectory(entry.directory, to: output) {
+                        try ShellSigningIdentityStore().signPackageManifest($0)
+                    }
                 }
                 try Task.checkCancellation()
                 return output
@@ -1898,7 +1904,7 @@ extension ShellHostModel {
             try packageLauncher.checkCompatibility(entry.manifest)
             let library = packageLibrary
             let installed = try await Task.detached(priority: .userInitiated) {
-                let prepared = try library.prepare(entry.archive)
+                let prepared = try library.prepare(entry)
                 defer { library.discard(prepared) }
                 return try library.install(prepared, checkCompatibility: { _ in }) { executable in
                     try ShellSigningIdentityStore().sign(library: executable, expectedTeamID: team)

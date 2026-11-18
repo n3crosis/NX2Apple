@@ -1,12 +1,15 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
-/// Imported NXB games are independent of legacy framework bundles. The original
-/// archive remains unchanged; only the private installed executable is re-signed.
+/// Imported NXB games are independent of legacy framework bundles. Game assets
+/// are stored once; only the executable keeps a transport and a locally signed copy.
 public struct GamePackageLibrary: Sendable {
     private static let activationLock = NSRecursiveLock()
     public struct Prepared: Sendable, Identifiable {
         public let id: UUID
-        public let archive: URL
+        public let directory: URL
         public let preview: GamePackage.Preview
     }
 
@@ -24,65 +27,91 @@ public struct GamePackageLibrary: Sendable {
     public func prepare(_ source: URL) throws -> Prepared {
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
-        let id = UUID()
-        let archive = root.appendingPathComponent(".import-\(id.uuidString).nxb")
-        do {
-            var coordinationError: NSError?
-            var copyError: Error?
-            NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: source, options: [], error: &coordinationError) { readable in
-                do { try fm.copyItem(at: readable, to: archive) }
-                catch { copyError = error }
+        let access = source.startAccessingSecurityScopedResource()
+        defer { if access { source.stopAccessingSecurityScopedResource() } }
+        var coordinationError: NSError?
+        var result: Result<Prepared, Error>?
+        NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: source, options: [], error: &coordinationError) { readable in
+            result = Result {
+                let staged = try GamePackage.stage(readable, in: root, allowUnsigned: true,
+                    verifyPublisher: Self.verifyPublisher, allowUnknownPublisher: true) { _ in }
+                return Prepared(id: UUID(), directory: staged.directory, preview: staged.preview)
             }
-            if let coordinationError { throw coordinationError }
-            if let copyError { throw copyError }
-            let preview = try GamePackage.inspect(archive, verifyPublisher: Self.verifyPublisher)
-            return Prepared(id: id, archive: archive, preview: preview)
-        } catch {
-            try? fm.removeItem(at: archive)
-            throw error
         }
+        if let coordinationError { throw coordinationError }
+        guard let result else { throw GamePackageError.invalid("source file unavailable") }
+        return try result.get()
+    }
+
+    /// A network receiver writes directly into a private staging directory under
+    /// this library. Verification precedes preview and activation; no ZIP is retained.
+    public func prepareDirectory(_ directory: URL) throws -> Prepared {
+        guard directory.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL,
+              directory.lastPathComponent.hasPrefix(".nxb-"),
+              try FileManager.default.attributesOfItem(atPath: directory.path)[.type] as? FileAttributeType == .typeDirectory else {
+            throw GamePackageError.invalid("invalid staging directory")
+        }
+        return Prepared(id: UUID(), directory: directory, preview: try GamePackage.inspectDirectory(directory))
+    }
+
+    /// Old installations still have original.nxb. New ones retain just the
+    /// transport executable and share the installed data with future exports.
+    public func prepare(_ entry: Entry) throws -> Prepared {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: entry.archive.path) { return try prepare(entry.archive) }
+        let directory = root.appendingPathComponent(".nxb-" + UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: false)
+        do {
+            for name in [GamePackageManifest.fileName, "nxb.signature.json"] {
+                let source = entry.directory.appendingPathComponent(name)
+                if fm.fileExists(atPath: source.path) { try fm.copyItem(at: source, to: directory.appendingPathComponent(name)) }
+            }
+            for file in entry.manifest.files {
+                let destination = directory.appendingPathComponent(file.path)
+                try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Self.cloneOrCopy(GamePackage.transportFile(file, in: entry.directory), to: destination)
+            }
+            return try prepareDirectory(directory)
+        } catch { try? fm.removeItem(at: directory); throw error }
     }
 
     public func discard(_ prepared: Prepared) {
-        try? FileManager.default.removeItem(at: prepared.archive)
+        try? FileManager.default.removeItem(at: prepared.directory)
     }
 
-    /// External packages require preview confirmation, including unsigned or unknown
-    /// publishers. Local builds install directly. Both verify and sign before activation.
+    /// The staged files become the installed generation by rename, not copying.
+    /// A failed replacement leaves the active generation and saves untouched.
     public func install(_ prepared: Prepared,
                         checkCompatibility: (GamePackageManifest) throws -> Void,
                         sign: (URL) throws -> Void) throws -> Entry {
         let fm = FileManager.default
-        let staged = try GamePackage.stage(prepared.archive, in: root, allowUnsigned: true,
-            verifyPublisher: Self.verifyPublisher, allowUnknownPublisher: true) { manifest in
-                guard manifest == prepared.preview.manifest else {
-                    throw GamePackageError.invalid("package changed since preview")
-                }
-                try checkCompatibility(manifest)
-            }
-        defer { try? fm.removeItem(at: staged.directory) }
-        guard staged.publisher?.keyID == prepared.preview.publisher?.keyID,
-              staged.publisher?.certificateSHA256 == prepared.preview.publisher?.certificateSHA256 else {
-            throw GamePackageError.invalid("publisher changed since preview")
+        let verified = try GamePackage.inspectDirectory(prepared.directory)
+        guard verified.manifestSHA256 == prepared.preview.manifestSHA256,
+              verified.publisher?.keyID == prepared.preview.publisher?.keyID,
+              verified.publisher?.certificateSHA256 == prepared.preview.publisher?.certificateSHA256 else {
+            throw GamePackageError.invalid("package changed since preview")
         }
-        try sign(staged.directory.appendingPathComponent("run/nxgame.dylib"))
-        try fm.copyItem(at: prepared.archive, to: staged.directory.appendingPathComponent("original.nxb"))
-        let titleRoot = root.appendingPathComponent(staged.manifest.titleID, isDirectory: true)
+        try checkCompatibility(verified.manifest)
+        let executable = prepared.directory.appendingPathComponent("run/nxgame.dylib")
+        let original = prepared.directory.appendingPathComponent("original.dylib")
+        if fm.fileExists(atPath: original.path) {
+            if fm.fileExists(atPath: executable.path) { try fm.removeItem(at: executable) }
+            try Self.cloneOrCopy(original, to: executable)
+        } else { try Self.cloneOrCopy(executable, to: original) }
+        try sign(executable)
+        let titleRoot = root.appendingPathComponent(verified.manifest.titleID, isDirectory: true)
         try fm.createDirectory(at: titleRoot, withIntermediateDirectories: true)
-        // A new local generation avoids mutating an installed or loaded image.
         let generation = UUID().uuidString.lowercased()
         let destination = titleRoot.appendingPathComponent(generation, isDirectory: true)
         Self.activationLock.lock()
         defer { Self.activationLock.unlock() }
-        try fm.moveItem(at: staged.directory, to: destination)
-        do {
-            try Data(generation.utf8).write(to: titleRoot.appendingPathComponent("active"), options: .atomic)
-        } catch {
-            try? fm.removeItem(at: destination)
+        try fm.moveItem(at: prepared.directory, to: destination)
+        do { try Data(generation.utf8).write(to: titleRoot.appendingPathComponent("active"), options: .atomic) }
+        catch {
+            try? fm.moveItem(at: destination, to: prepared.directory)
             throw error
         }
-        discard(prepared)
-        return Entry(manifest: staged.manifest, directory: destination)
+        return Entry(manifest: verified.manifest, directory: destination)
     }
 
     public func entries() -> [Entry] {
@@ -124,6 +153,22 @@ public struct GamePackageLibrary: Sendable {
         defer { Self.activationLock.unlock() }
         try FileManager.default.removeItem(at: root.appendingPathComponent(entry.id).appendingPathComponent("active"))
         try prune(preserving: loaded)
+    }
+
+    /// APFS clones share storage, not writable inodes. Re-signing a staged copy
+    /// cannot mutate the active generation. Other volumes use an independent copy.
+    private static func cloneOrCopy(_ source: URL, to destination: URL) throws {
+        #if canImport(Darwin)
+        let result = source.path.withCString { sourcePath in
+            destination.path.withCString { clonefile(sourcePath, $0, UInt32(CLONE_NOFOLLOW)) }
+        }
+        if result == 0 { return }
+        let code = errno
+        guard code == ENOTSUP || code == EXDEV else {
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        #endif
+        try FileManager.default.copyItem(at: source, to: destination)
     }
 
     private static func verifyPublisher(_ manifest: Data, _ proof: Data) throws -> GamePackagePublisher {
