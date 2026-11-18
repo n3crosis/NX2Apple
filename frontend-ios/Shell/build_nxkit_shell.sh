@@ -129,6 +129,13 @@ text = text.replace('        CFBundleDisplayName:', '''        CFBundleDocumentT
 text = text.replace('        CFBundleDisplayName:', f'        NXKitRuntimeRevision: "{revision}"\n        NXKitRuntimeABI: {abi}\n        CFBundleDisplayName:')
 text = '\n'.join(line for line in text.splitlines() if '# @FRAMEWORKS@' not in line) + '\n'
 if os.environ['SHELL_PLATFORM'] == 'maccatalyst':
+    # Xcode resolves the default Keychain group from the selected signing profile.
+    text = text.replace('    settings:\n',
+        '    entitlements:\n'
+        '      path: Gen/DmShell.entitlements\n'
+        '      properties:\n'
+        '        keychain-access-groups: ["$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)"]\n'
+        '    settings:\n')
     text = text.replace('@executable_path/Frameworks', '@executable_path/../Frameworks')
     text = text.replace('-mcpu=apple-a18', '-mcpu=apple-m1')
     text = text.replace('      TARGETED_DEVICE_FAMILY:',

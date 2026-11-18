@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import ShellUI
 import CoreImage.CIFilterBuiltins
 #if os(iOS)
@@ -77,11 +78,17 @@ struct GamePackageReceiveView: View {
     @State private var receiving = false
     @State private var progress: Double = 0
     @State private var error: String?
+    @State private var pickingPackage = false
     @State private var scanning = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Button { pickingPackage = true } label: {
+                        Label(hostText("Choose file…"), systemImage: "folder")
+                    }.disabled(receiving)
+                }
                 Section {
                     TextField(hostText("Sharing link"), text: $link)
                         .autocorrectionDisabled().disabled(receiving)
@@ -102,10 +109,18 @@ struct GamePackageReceiveView: View {
                 if let error { Section { Text(verbatim: error).textSelection(.enabled) } }
             }
             .scrollContentBackground(.hidden).background(ShellPalette.background)
-            .navigationTitle(hostText("Receive game"))
+            .navigationTitle(hostText("Import prebuilt games"))
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button(hostText("Cancel"), action: close) } }
         }
         .tint(ShellPalette.cream).preferredColorScheme(.dark)
+        .fileImporter(isPresented: $pickingPackage, allowedContentTypes: [UTType(filenameExtension: "nxb") ?? .data]) { result in
+            switch result {
+            case .success(let url):
+                model.enqueueExternalPackage(url)
+                close()
+            case .failure(let failure): error = failure.localizedDescription
+            }
+        }
         .task(id: receiving) {
             guard receiving else { return }
             defer { receiving = false }

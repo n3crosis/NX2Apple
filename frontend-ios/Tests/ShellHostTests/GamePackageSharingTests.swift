@@ -20,15 +20,16 @@ final class GamePackageSharingTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
 
-    func testInvitationRequiresPinnedTLSAndLANAddress() throws {
-        let credentials = String(repeating: "a", count: 64) + "." + String(repeating: "b", count: 64)
-        let invitation = try GamePackageShareInvitation(url: XCTUnwrap(URL(string: "https://192.168.1.2:8443/nxb/1#\(credentials)")))
+    func testInvitationRequiresTokenAndLANAddress() throws {
+        let credentials = String(repeating: "b", count: 64)
+        let invitation = try GamePackageShareInvitation(url: XCTUnwrap(URL(string: "http://192.168.1.2:8443/nxb/1#\(credentials)")))
         XCTAssertNil(invitation.address.fragment)
-        for address in ["http://192.168.1.2:8443/nxb/1", "https://example.com:8443/nxb/1",
-                        "https://127.0.0.1:8443/nxb/1", "https://192.168.foo.1.2:8443/nxb/1", "https://192.168.1.2:8443/other",
-                        "https://192.168.1.2:8443/nxb/1?token=secret"] {
+        XCTAssertEqual(invitation.token, credentials)
+        for address in ["https://192.168.1.2:8443/nxb/1", "http://example.com:8443/nxb/1",
+                        "http://127.0.0.1:8443/nxb/1", "http://192.168.foo.1.2:8443/nxb/1", "http://192.168.1.2:8443/other",
+                        "http://192.168.1.2:8443/nxb/1?token=secret"] {
             XCTAssertThrowsError(try GamePackageShareInvitation(url: XCTUnwrap(URL(string: "\(address)#\(credentials)"))))
         }
-        XCTAssertThrowsError(try GamePackageShareInvitation(url: XCTUnwrap(URL(string: "https://192.168.1.2:8443/nxb/1#missing-pin"))))
+        XCTAssertThrowsError(try GamePackageShareInvitation(url: XCTUnwrap(URL(string: "http://192.168.1.2:8443/nxb/1#missing-token"))))
     }
 }

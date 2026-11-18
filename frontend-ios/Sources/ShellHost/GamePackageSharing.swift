@@ -1,31 +1,27 @@
 import Foundation
 import CryptoKit
-import Security
-import X509
-import NIOSSL
 import Vapor
 import Darwin
 
-/// A QR is a short-lived invitation, not a public download link. Only its address
-/// goes over the network. The fragment carries the TLS pin and access token.
+/// A QR is a short-lived invitation, not a public download link. Its URL
+/// carries the access token in the fragment; requests send it in a header.
+/// HTTP is for trusted local networks, not confidential transport.
 public struct GamePackageShareInvitation: Sendable {
     let address: URL
-    let pin: String
     let token: String
 
     public init(url: URL) throws {
         guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              parts.scheme == "https", let host = parts.host, Self.isLAN(host),
+              parts.scheme == "http", let host = parts.host, Self.isLAN(host),
               let port = parts.port, (1...65535).contains(port),
               parts.user == nil, parts.password == nil, parts.query == nil,
               parts.path == "/nxb/1", let fragment = parts.fragment else {
             throw GamePackageError.invalid("invalid sharing invitation")
         }
-        let fields = fragment.split(separator: ".", omittingEmptySubsequences: false)
-        guard fields.count == 2, fields.allSatisfy({ $0.count == 64 && $0.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) }) else {
+        guard fragment.count == 64, fragment.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw GamePackageError.invalid("invalid sharing credentials")
         }
-        pin = String(fields[0]); token = String(fields[1])
+        token = fragment
         parts.fragment = nil
         guard let address = parts.url else { throw GamePackageError.invalid("invalid sharing address") }
         self.address = address
@@ -72,29 +68,12 @@ public actor GamePackageShareServer {
         defer { if !retained { GamePackageLibrary.releaseSharing(directory) } }
         let source = try ShareSource(directory: directory)
         let host = try Self.localAddress()
-        let key = P256.Signing.PrivateKey()
-        let name = try DistinguishedName { CommonName("NX2Apple local transfer") }
         let now = Date()
-        let certificate = try Certificate(version: .v3,
-            serialNumber: .init(bytes: SymmetricKey(size: .bits128).withUnsafeBytes { Array($0) }),
-            publicKey: .init(key.publicKey), notValidBefore: now.addingTimeInterval(-60),
-            notValidAfter: now.addingTimeInterval(86400), issuer: name, subject: name,
-            signatureAlgorithm: .ecdsaWithSHA256, extensions: Certificate.Extensions {
-                Critical(BasicConstraints.notCertificateAuthority)
-                KeyUsage(digitalSignature: true)
-            }, issuerPrivateKey: .init(key))
-        let certificatePEM = try certificate.serializeAsPEM().pemString
-        let tlsCertificate = try NIOSSLCertificate(bytes: Array(certificatePEM.utf8), format: .pem)
-        let pin = Self.digest(Data(try tlsCertificate.toDERBytes()))
         let token = SymmetricKey(size: .bits256).withUnsafeBytes { Self.hex(Data($0)) }
         let app = try await Application.make(.production)
         do {
             app.logger.logLevel = .critical
             app.middleware = .init() // No request logging of invitation credentials.
-            var tls = TLSConfiguration.makeServerConfiguration(certificateChain: [.certificate(tlsCertificate)],
-                privateKey: .privateKey(try NIOSSLPrivateKey(bytes: Array(key.pemRepresentation.utf8), format: .pem)))
-            tls.minimumTLSVersion = .tlsv12
-            app.http.server.configuration.tlsConfiguration = tls
             app.http.server.configuration.hostname = host
             app.http.server.configuration.port = 0
             app.routes.defaultMaxBodySize = "1kb"
@@ -118,7 +97,7 @@ public actor GamePackageShareServer {
             }
             try await app.server.start(address: nil)
             guard !cancelled, let port = app.http.server.shared.localAddress?.port,
-                  let url = URL(string: "https://\(host):\(port)/nxb/1#\(pin).\(token)") else {
+                  let url = URL(string: "http://\(host):\(port)/nxb/1#\(token)") else {
                 throw CancellationError()
             }
             application = app
@@ -264,7 +243,7 @@ public actor GamePackageShareClient {
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 60
         session = URLSession(configuration: configuration,
-            delegate: ShareTrust(pin: invitation.pin, host: invitation.address.host!, port: invitation.address.port!),
+            delegate: ShareRedirects(),
             delegateQueue: nil)
     }
 
@@ -359,27 +338,7 @@ public actor GamePackageShareClient {
     }
 }
 
-private final class ShareTrust: NSObject, URLSessionDelegate, URLSessionTaskDelegate, Sendable {
-    let pin: String
-    let host: String
-    let port: Int
-    init(pin: String, host: String, port: Int) { self.pin = pin; self.host = host; self.port = port }
-
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        let space = challenge.protectionSpace
-        guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              space.host == host, space.port == port, let trust = space.serverTrust,
-              let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leaf = chain.first,
-              GamePackageShareServer.digest(SecCertificateCopyData(leaf) as Data) == pin else {
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-        // This session trusts only the exact ephemeral certificate shown in the
-        // scanned QR, not arbitrary self-signed certificates or the system store.
-        completionHandler(.useCredential, URLCredential(trust: trust))
-    }
-
+private final class ShareRedirects: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         completionHandler(nil)

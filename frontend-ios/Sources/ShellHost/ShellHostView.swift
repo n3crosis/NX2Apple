@@ -1,6 +1,5 @@
 import SwiftUI
 import ShellUI
-import UniformTypeIdentifiers
 
 /// `LibraryView` on a `ShellHostModel`: the real shell screen, plus the read-only log sheet and the notice alert. The
 /// launch arguments of the demo (initial selection and so on) are not part of it.
@@ -8,7 +7,6 @@ public struct ShellHostView: View {
     @Bindable private var model: ShellHostModel
     @State private var receivingPackage = false
     @State private var receiverPresented = false
-    @State private var pickingPackage = false
     @State private var buildingPackage = false
     private let buildGame: GamePackageBuild?
     private let initialSelection: String?
@@ -22,7 +20,7 @@ public struct ShellHostView: View {
     }
 
     private var libraryInputEnabled: Bool {
-        !receivingPackage && model.sharingPackage == nil && !buildingPackage && !pickingPackage && model.canPreparePackage
+        !receiverPresented && model.sharingPackage == nil && !buildingPackage && model.canPreparePackage
     }
 
     private var canPrepareExternalPackage: Bool { libraryInputEnabled && model.hasExternalPackage }
@@ -43,12 +41,6 @@ public struct ShellHostView: View {
                             canOpenHomeButtonSettings: model.canOpenHomeButtonSettings,
                             importGameButton: AnyView(importButton))
                     .disabled(model.launchingGame || model.resigningGame || model.importingPackage)
-                    .fileImporter(isPresented: $pickingPackage, allowedContentTypes: [UTType(filenameExtension: "nxb") ?? .data]) { result in
-                        switch result {
-                        case .success(let url): model.enqueueExternalPackage(url)
-                        case .failure(let error): model.notice = error.localizedDescription
-                        }
-                    }
                     .sheet(item: $model.sharingPackage) { entry in
                         GamePackageShareView(entry: entry)
                     }
@@ -112,13 +104,14 @@ public struct ShellHostView: View {
     }
     @ViewBuilder private var importButton: some View {
         Menu {
-            Button(hostText("Import prebuilt games")) { pickingPackage = true }
-            Button(hostText("Receive game")) { receiverPresented = true; receivingPackage = true }
+            Button(hostText("Import prebuilt games")) { receiverPresented = true; receivingPackage = true }
+                .accessibilityIdentifier("package.import.choose")
             if buildGame != nil { Button(hostText("Build games")) { buildingPackage = true } }
         } label: {
             Label(hostText("Import prebuilt games"), systemImage: "square.and.arrow.down")
         }
         .disabled(!libraryInputEnabled || model.isGameRunning)
+        .accessibilityIdentifier("package.import.open")
     }
 
 }

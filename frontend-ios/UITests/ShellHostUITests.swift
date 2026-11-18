@@ -12,6 +12,22 @@ import XCTest
         XCTAssertTrue(app.buttons["tile.\(id)"].waitForExistence(timeout: 10))
     }
 
+    func testImportOffersFilesAndSharingLinkAndCanReopen() {
+        launch(select: "0100000000010000")
+        for _ in 0..<2 {
+            let open = app.buttons["package.import.open"]
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true AND isEnabled == true"), object: open)
+            XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed)
+            open.tap()
+            app.buttons["package.import.choose"].tap()
+            XCTAssertTrue(app.buttons["Choose file…"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.textFields["Sharing link"].exists)
+            XCTAssertFalse(app.buttons["Receive game"].isEnabled)
+            app.navigationBars["Import prebuilt games"].buttons["Cancel"].tap()
+            XCTAssertTrue(open.waitForExistence(timeout: 5))
+        }
+    }
+
     func testSigningIdentityBackReturnsToSettings() {
         launch(select: "0100000000010000")
         app.buttons["shellSettings.open"].tap()

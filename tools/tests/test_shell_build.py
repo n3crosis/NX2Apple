@@ -228,6 +228,14 @@ class NxkitShellPackageTests(unittest.TestCase):
             self.assertIn('public.filename-extension: [nxb]', project)
             self.assertIn('NXKitRuntimeRevision: "' + 'a' * 40 + '"', project)
             self.assertNotIn('# @FRAMEWORKS@', project)
+            self.assertNotIn('keychain-access-groups:', project)
+            env['SHELL_PLATFORM'] = 'maccatalyst'
+            subprocess.run([sys.executable, '-I', '-', str(SCRIPT.parent / 'project-shell.yml'), tmp],
+                           input=generator, text=True, env=env, check=True)
+            project = (out / 'project.yml').read_text()
+            self.assertIn('path: Gen/DmShell.entitlements', project)
+            self.assertIn('keychain-access-groups: ["$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)"]', project)
+            self.assertNotIn('com.apple.security.application-groups:', project)
 
     def test_catalyst_validation_does_not_require_or_export_signing(self):
         script = (SCRIPT.parent / 'build_nxkit_shell.sh').read_text()
