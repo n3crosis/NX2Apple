@@ -2545,5 +2545,10 @@
   "ios.host.sharing.invalid": "Invalid sharing link",
   "ios.host.sharing.share_link": "Share link",
   "ios.host.sharing.instructions": "Scan on another device on the same network. Keep this screen open until the transfer finishes.",
-  "ios.host.sharing.title": "Share game"
+  "ios.host.sharing.title": "Share game",
+  "ios.host.sharing.local": "Local network",
+  "ios.host.sharing.internet": "Share over the internet",
+  "ios.host.sharing.disclosure": "Cloudflare can read transferred game data. Anyone with the link can download it.",
+  "ios.host.sharing.remote_instructions": "Scan or paste this link in NX2Apple on another device. Keep this screen open until the transfer finishes.",
+  "ios.host.sharing.allow_internet": "Allow internet transfer"
 }

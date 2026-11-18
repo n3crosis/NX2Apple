@@ -23,6 +23,14 @@ import XCTest
             XCTAssertTrue(app.buttons["Choose file…"].waitForExistence(timeout: 5))
             XCTAssertTrue(app.textFields["Sharing link"].exists)
             XCTAssertFalse(app.buttons["Receive game"].isEnabled)
+            let link = app.textFields["Sharing link"]
+            link.tap()
+            link.typeText("https://fixture.trycloudflare.com/nxb/1#" + String(repeating: "a", count: 64))
+            let consent = app.switches["sharing.allowInternet"]
+            XCTAssertTrue(consent.waitForExistence(timeout: 5))
+            XCTAssertFalse(app.buttons["Receive game"].isEnabled)
+            consent.tap()
+            XCTAssertTrue(app.buttons["Receive game"].isEnabled)
             app.navigationBars["Import prebuilt games"].buttons["Cancel"].tap()
             XCTAssertTrue(open.waitForExistence(timeout: 5))
         }

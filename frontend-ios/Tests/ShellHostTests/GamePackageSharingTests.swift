@@ -32,4 +32,18 @@ final class GamePackageSharingTests: XCTestCase {
         }
         XCTAssertThrowsError(try GamePackageShareInvitation(url: XCTUnwrap(URL(string: "http://192.168.1.2:8443/nxb/1#missing-token"))))
     }
+    func testRemoteInvitationRequiresExplicitHTTPSCloudflareMode() throws {
+        let token = String(repeating: "b", count: 64)
+        let url = try XCTUnwrap(URL(string: "https://sample-name.trycloudflare.com/nxb/1#\(token)"))
+        XCTAssertThrowsError(try GamePackageShareInvitation(url: url))
+        let invitation = try GamePackageShareInvitation(url: url, remote: true)
+        XCTAssertEqual(invitation.token, token)
+        XCTAssertNil(invitation.address.fragment)
+        for origin in ["http://sample.trycloudflare.com", "https://trycloudflare.com", "https://sample.trycloudflare.com.evil.com",
+                       "https://a.b.trycloudflare.com", "https://sample.trycloudflare.com:8443", "https://192.168.1.2:443"] {
+            XCTAssertThrowsError(try GamePackageShareInvitation(
+                url: XCTUnwrap(URL(string: "\(origin)/nxb/1#\(token)")), remote: true))
+        }
+    }
+
 }

@@ -138,7 +138,12 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
         #else
         let buildGame: GamePackageBuild? = nil
         #endif
-        let host = UIHostingController(rootView: ShellHostView(model: model, buildGame: buildGame))
+        #if canImport(GameTunnelC)
+        let gameTunnel: GamePackageTunnelFactory? = { GameTunnel() }
+        #else
+        let gameTunnel: GamePackageTunnelFactory? = nil
+        #endif
+        let host = UIHostingController(rootView: ShellHostView(model: model, buildGame: buildGame, gameTunnel: gameTunnel))
         host.view.backgroundColor = .black
         return host
     }

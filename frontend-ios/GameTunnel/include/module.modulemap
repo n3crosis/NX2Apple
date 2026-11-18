@@ -1,0 +1,4 @@
+module GameTunnelC {
+    header "GameTunnel.h"
+    export *
+}

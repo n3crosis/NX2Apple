@@ -3,17 +3,22 @@ import CryptoKit
 import Vapor
 import Darwin
 
-/// A QR is a short-lived invitation, not a public download link. Its URL
-/// carries the access token in the fragment; requests send it in a header.
-/// HTTP is for trusted local networks, not confidential transport.
+public protocol GamePackageTunnel: Actor {
+    func start(port: UInt16) async throws -> URL
+    func stop() async
+}
+public typealias GamePackageTunnelFactory = @Sendable () -> any GamePackageTunnel
+
+/// Local HTTP is unencrypted; remote HTTPS trusts Cloudflare with transfer contents.
+/// The short-lived token stays in the invitation fragment and request headers.
 public struct GamePackageShareInvitation: Sendable {
     let address: URL
     let token: String
 
-    public init(url: URL) throws {
+    public init(url: URL, remote: Bool = false) throws {
         guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              parts.scheme == "http", let host = parts.host, Self.isLAN(host),
-              let port = parts.port, (1...65535).contains(port),
+              let host = parts.host,
+              remote ? Self.isRemote(parts) : (parts.scheme == "http" && Self.isLAN(host) && (1...65535).contains(parts.port ?? 0)),
               parts.user == nil, parts.password == nil, parts.query == nil,
               parts.path == "/nxb/1", let fragment = parts.fragment else {
             throw GamePackageError.invalid("invalid sharing invitation")
@@ -27,7 +32,15 @@ public struct GamePackageShareInvitation: Sendable {
         self.address = address
     }
 
-    // No DNS rebinding, internet listener or cloud relay in this LAN-only flow.
+    static func isRemote(_ parts: URLComponents) -> Bool {
+        guard parts.scheme == "https", parts.port == nil || parts.port == 443,
+              let host = parts.host, host.hasSuffix(".trycloudflare.com") else { return false }
+        let label = host.dropLast(".trycloudflare.com".count)
+        return !label.isEmpty && label.first != "-" && label.last != "-" &&
+            label.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }
+    }
+
+    // Numeric private addresses only: no DNS rebinding in local mode.
     static func isLAN(_ host: String) -> Bool {
         let parts = host.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 4 else { return false }
@@ -42,16 +55,22 @@ public actor GamePackageShareServer {
     private var application: Application?
     private var leasedDirectory: URL?
     private var starting = false
+    private var stopping = false
     private var cancelled = false
+    private var authorization: ShareAuthorization?
+    private let tunnel: (any GamePackageTunnel)?
     static let chunkSize = 1 << 20
 
-    public init() {}
+    public init(tunnel: (any GamePackageTunnel)? = nil) { self.tunnel = tunnel }
 
     deinit {
+        authorization?.revoke()
+        let tunnel = tunnel
         if let app = application {
             let directory = leasedDirectory
             Task {
                 try? await app.asyncShutdown()
+                await tunnel?.stop()
                 if let directory { GamePackageLibrary.releaseSharing(directory) }
             }
         }
@@ -59,17 +78,21 @@ public actor GamePackageShareServer {
 
     /// Retains this installed generation across library cleanup in all windows.
     /// Caller stops when the sheet dismisses or the app leaves the foreground.
-    public func start(directory: URL) async throws -> URL {
-        guard application == nil, !starting else { throw GamePackageError.invalid("sharing already active") }
+    public func start(directory: URL, remote: Bool = false) async throws -> URL {
+        guard application == nil, !starting, !stopping else { throw GamePackageError.invalid("sharing already active") }
+        guard !remote || tunnel != nil else { throw GamePackageError.invalid("remote sharing unavailable") }
         starting = true; cancelled = false
         defer { starting = false }
         GamePackageLibrary.retainSharing(directory)
         var retained = false
         defer { if !retained { GamePackageLibrary.releaseSharing(directory) } }
         let source = try ShareSource(directory: directory)
-        let host = try Self.localAddress()
+        let host = try (remote ? "127.0.0.1" : Self.localAddress())
         let now = Date()
         let token = SymmetricKey(size: .bits256).withUnsafeBytes { Self.hex(Data($0)) }
+        let authorization = ShareAuthorization(token: token, expires: now.addingTimeInterval(3600))
+        self.authorization = authorization
+        defer { if !retained { authorization.revoke(); self.authorization = nil } }
         let app = try await Application.make(.production)
         do {
             app.logger.logLevel = .critical
@@ -77,9 +100,8 @@ public actor GamePackageShareServer {
             app.http.server.configuration.hostname = host
             app.http.server.configuration.port = 0
             app.routes.defaultMaxBodySize = "1kb"
-            let expires = now.addingTimeInterval(3600)
             app.get("nxb", "1", "metadata", ":kind") { request async throws -> Response in
-                try Self.authorize(request, token: token, expires: expires)
+                try authorization.check(request)
                 let bytes: Data
                 switch request.parameters.get("kind") {
                 case "manifest": bytes = source.manifestBytes
@@ -89,40 +111,62 @@ public actor GamePackageShareServer {
                 return Self.response(bytes)
             }
             app.get("nxb", "1", "file", ":index", ":offset") { request async throws -> Response in
-                try Self.authorize(request, token: token, expires: expires)
+                try authorization.check(request)
                 guard let index = request.parameters.get("index", as: Int.self),
                       let offset = request.parameters.get("offset", as: UInt64.self) else { throw Abort(.badRequest) }
                 let bytes = try await Task.detached { try source.read(index: index, offset: offset) }.value
                 return Self.response(bytes)
             }
             try await app.server.start(address: nil)
-            guard !cancelled, let port = app.http.server.shared.localAddress?.port,
-                  let url = URL(string: "http://\(host):\(port)/nxb/1#\(token)") else {
-                throw CancellationError()
+            guard !cancelled, !Task.isCancelled, let port = app.http.server.shared.localAddress?.port,
+                  let port = UInt16(exactly: port) else { throw CancellationError() }
+            var parts: URLComponents
+            if remote, let tunnel {
+                let origin = try await tunnel.start(port: port)
+                guard let remoteParts = URLComponents(url: origin, resolvingAgainstBaseURL: false),
+                      GamePackageShareInvitation.isRemote(remoteParts), remoteParts.user == nil,
+                      remoteParts.password == nil, remoteParts.query == nil, remoteParts.fragment == nil,
+                      remoteParts.path.isEmpty || remoteParts.path == "/" else {
+                    throw GamePackageError.invalid("invalid remote sharing address")
+                }
+                parts = remoteParts
+            } else {
+                parts = URLComponents()
+                parts.scheme = "http"; parts.host = host; parts.port = Int(port)
             }
+            guard !cancelled, !Task.isCancelled else { throw CancellationError() }
+            parts.path = "/nxb/1"; parts.fragment = token
+            guard let url = parts.url else { throw GamePackageError.invalid("invalid sharing address") }
             application = app
             leasedDirectory = directory
             retained = true
             return url
         } catch {
+            authorization.revoke()
             try? await app.asyncShutdown()
+            if remote { await tunnel?.stop() }
             throw error
         }
     }
 
     public func stop() async {
         cancelled = true
+        authorization?.revoke()
+        guard !stopping else { return }
+        stopping = true
+        defer { stopping = false }
+        if starting {
+            await tunnel?.stop()
+            return
+        }
         guard let app = application else { return }
-        application = nil
         let directory = leasedDirectory
         leasedDirectory = nil
         try? await app.asyncShutdown()
+        await tunnel?.stop()
+        application = nil
+        authorization = nil
         if let directory { GamePackageLibrary.releaseSharing(directory) }
-    }
-
-    private static func authorize(_ request: Request, token: String, expires: Date) throws {
-        guard Date() < expires, let supplied = request.headers.bearerAuthorization?.token,
-              digest(Data(supplied.utf8)) == digest(Data(token.utf8)) else { throw Abort(.unauthorized) }
     }
 
     private static func response(_ data: Data) -> Response {
@@ -150,6 +194,23 @@ public actor GamePackageShareServer {
             }
         }
         throw GamePackageError.invalid("connect to a local network to share")
+    }
+}
+
+// Revocation is synchronous even while server/tunnel shutdown awaits another actor.
+private final class ShareAuthorization: @unchecked Sendable {
+    private let lock = NSLock()
+    private var revoked = false
+    private let token: String
+    private let expires: Date
+    init(token: String, expires: Date) { self.token = token; self.expires = expires }
+    func revoke() { lock.lock(); defer { lock.unlock() }; revoked = true }
+    func check(_ request: Request) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !revoked, Date() < expires, let supplied = request.headers.bearerAuthorization?.token,
+              GamePackageShareServer.digest(Data(supplied.utf8)) == GamePackageShareServer.digest(Data(token.utf8)) else {
+            throw Abort(.unauthorized)
+        }
     }
 }
 
@@ -233,8 +294,8 @@ public actor GamePackageShareClient {
     private let session: URLSession
     private var metadata: (Data, Data?, GamePackage.Preview)?
 
-    public init(url: URL) throws {
-        let invitation = try GamePackageShareInvitation(url: url)
+    public init(url: URL, remote: Bool = false) throws {
+        let invitation = try GamePackageShareInvitation(url: url, remote: remote)
         self.invitation = invitation
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil

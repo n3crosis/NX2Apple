@@ -2546,5 +2546,10 @@
   "ios.host.sharing.invalid": "Enlace para compartir no válido",
   "ios.host.sharing.share_link": "Compartir enlace",
   "ios.host.sharing.instructions": "Escanea desde otro dispositivo en la misma red. Mantén esta pantalla abierta hasta que termine la transferencia.",
-  "ios.host.sharing.title": "Compartir juego"
+  "ios.host.sharing.title": "Compartir juego",
+  "ios.host.sharing.local": "Red local",
+  "ios.host.sharing.internet": "Compartir por internet",
+  "ios.host.sharing.disclosure": "Cloudflare puede leer los datos del juego transferidos. Cualquiera que tenga el enlace puede descargarlos.",
+  "ios.host.sharing.remote_instructions": "Escanea este enlace o pégalo en NX2Apple en otro dispositivo. Mantén esta pantalla abierta hasta que termine la transferencia.",
+  "ios.host.sharing.allow_internet": "Permitir transferencia por internet"
 }

@@ -67,7 +67,7 @@ export NXKIT_ARTIFACT_DIR="$S/Rust/$RUST_TARGET/release"
 export SDKROOT=$(xcrun --sdk "$APPLE_SDK" --show-sdk-path)
 export IPHONEOS_DEPLOYMENT_TARGET=26.0
 export MACOSX_DEPLOYMENT_TARGET=26.0
-# One staticlib owns the Rust runtime/allocator for both producer and player.
+# One staticlib owns the Rust runtime/allocator for producer, player and optional tunnel.
 # The local crate is build glue, not a vendored copy or a remote fork dependency.
 python3 -I - "$S/Native" <<'NATIVE'
 import json, os, pathlib, sys
@@ -75,6 +75,7 @@ root = pathlib.Path(sys.argv[1])
 (root / 'src').mkdir(parents=True, exist_ok=True)
 runtime = json.dumps(os.environ['NXKIT_SOURCE'] + '/crates/nxkit-host')
 producer = json.dumps(os.environ['NXKIT_BUILDER_SOURCE'])
+tunnel = json.dumps(os.environ['DM_SHELL_PACKAGE'] + '/GameTunnel')
 (root / 'Cargo.toml').write_text(f'''[package]
 name = "nxkit-shell-native"
 version = "0.1.0"
@@ -87,10 +88,11 @@ crate-type = ["staticlib"]
 [dependencies]
 nxkit-runtime = {{ package = "nxkit-host", path = {runtime} }}
 nxkit-producer-ffi = {{ path = {producer} }}
+nx-game-tunnel = {{ path = {tunnel} }}
 ''')
-(root / 'src/lib.rs').write_text('extern crate nxkit_runtime;\nextern crate nxkit_producer_ffi;\n')
+(root / 'src/lib.rs').write_text('extern crate nxkit_runtime;\nextern crate nxkit_producer_ffi;\nextern crate nx_game_tunnel;\n')
 NATIVE
-# Seed dependency versions from the patched upstream lock, then resolve the two local wrapper packages.
+# Seed dependency versions from the patched upstream lock, then resolve local wrapper packages.
 cp "$NXKIT_SOURCE/Cargo.lock" "$S/Native/Cargo.lock"
 cargo metadata --manifest-path "$S/Native/Cargo.toml" --format-version 1 > /dev/null
 # Rust reports transitive Apple frameworks and native libraries; do not maintain a second list.
@@ -112,6 +114,11 @@ flags = re.findall(r'native-static-libs: (.+)', (out / 'runtime-build.log').read
 if not flags:
     sys.exit('Rust did not report native-static-libs; cannot link the runtime safely.')
 text = source.read_text()
+text = text.replace('      - path: Gen/Assets.xcassets',
+    '      - path: ${DM_SHELL_PACKAGE}/GameTunnel/Notices\n'
+    '        type: folder\n'
+    '        buildPhase: resources\n'
+    '      - path: Gen/Assets.xcassets')
 text = text.replace('packages:\n', 'packages:\n  GameRuntime:\n    path: ${DM_SHELL_PACKAGE}/GameRuntime\n')
 text = text.replace('    dependencies:\n', '    dependencies:\n      - package: GameRuntime\n        product: GameRuntime\n')
 text = text.replace('        CFBundleDisplayName:', '''        CFBundleDocumentTypes:
@@ -149,7 +156,7 @@ archive_dir = os.environ['NXKIT_ARTIFACT_DIR']
 (out / 'Gen/dm.xcconfig').write_text(
     f'LIBRARY_SEARCH_PATHS = $(inherited) "{archive_dir}"\n'
     f'OTHER_LDFLAGS = $(inherited) -lnxkit_host {flags[-1]}\n'
-    f'SWIFT_INCLUDE_PATHS = $(inherited) "{os.environ["NXKIT_BUILDER_SOURCE"]}/include"\n')
+    f'SWIFT_INCLUDE_PATHS = $(inherited) "{os.environ["NXKIT_BUILDER_SOURCE"]}/include" "{os.environ["DM_SHELL_PACKAGE"]}/GameTunnel/include"\n')
 PY
 cd "$S"
 xcodegen generate

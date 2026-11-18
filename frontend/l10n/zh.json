@@ -2546,5 +2546,10 @@
   "ios.host.sharing.invalid": "分享链接无效",
   "ios.host.sharing.share_link": "分享链接",
   "ios.host.sharing.instructions": "在同一网络的另一台设备上扫描。请保持此页面打开，直到传输完成。",
-  "ios.host.sharing.title": "分享游戏"
+  "ios.host.sharing.title": "分享游戏",
+  "ios.host.sharing.local": "局域网",
+  "ios.host.sharing.internet": "通过互联网分享",
+  "ios.host.sharing.disclosure": "Cloudflare 可以读取传输的游戏数据。任何持有链接的人都可以下载。",
+  "ios.host.sharing.remote_instructions": "在另一台设备上扫描此链接或将其粘贴到 NX2Apple。请保持此页面开启，直到传输完成。",
+  "ios.host.sharing.allow_internet": "允许互联网传输"
 }

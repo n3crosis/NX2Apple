@@ -219,7 +219,8 @@ class NxkitShellPackageTests(unittest.TestCase):
             (out / 'Gen').mkdir()
             (out / 'runtime-build.log').write_text('note: native-static-libs: -framework Metal -lc++\n')
             env = dict(os.environ, SHELL_PLATFORM='ios', NXKIT_RUNTIME_REVISION='a' * 40, NXKIT_RUNTIME_ABI='1',
-                       NXKIT_ARTIFACT_DIR=str(out / 'Rust'), NXKIT_BUILDER_SOURCE=str(out / 'Builder'))
+                       NXKIT_ARTIFACT_DIR=str(out / 'Rust'), NXKIT_BUILDER_SOURCE=str(out / 'Builder'),
+                       DM_SHELL_PACKAGE=str(SCRIPT.parent.parent))
             subprocess.run([sys.executable, '-I', '-', str(SCRIPT.parent / 'project-shell.yml'), tmp],
                            input=generator, text=True, env=env, check=True)
             project = (out / 'project.yml').read_text()

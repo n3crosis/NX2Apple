@@ -2545,5 +2545,10 @@
   "ios.host.sharing.invalid": "無効な共有リンク",
   "ios.host.sharing.share_link": "リンクを共有",
   "ios.host.sharing.instructions": "同じネットワーク上の別のデバイスでスキャンしてください。転送が完了するまでこの画面を開いたままにしてください。",
-  "ios.host.sharing.title": "ゲームを共有"
+  "ios.host.sharing.title": "ゲームを共有",
+  "ios.host.sharing.local": "ローカルネットワーク",
+  "ios.host.sharing.internet": "インターネットで共有",
+  "ios.host.sharing.disclosure": "Cloudflareは転送されるゲームデータを読み取れます。リンクを知っている人は誰でもダウンロードできます。",
+  "ios.host.sharing.remote_instructions": "別のデバイスでこのリンクをスキャンするか、NX2Appleに貼り付けてください。転送が完了するまでこの画面を開いたままにしてください。",
+  "ios.host.sharing.allow_internet": "インターネット転送を許可"
 }

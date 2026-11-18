@@ -9,11 +9,13 @@ public struct ShellHostView: View {
     @State private var receiverPresented = false
     @State private var buildingPackage = false
     private let buildGame: GamePackageBuild?
+    private let gameTunnel: GamePackageTunnelFactory?
     private let initialSelection: String?
     private let initialDetailOpen: Bool
 
-    public init(model: ShellHostModel, initialSelection: String? = nil, initialDetailOpen: Bool = false, buildGame: GamePackageBuild? = nil) {
+    public init(model: ShellHostModel, initialSelection: String? = nil, initialDetailOpen: Bool = false, buildGame: GamePackageBuild? = nil, gameTunnel: GamePackageTunnelFactory? = nil) {
         self.buildGame = buildGame
+        self.gameTunnel = gameTunnel
         self.model = model
         self.initialSelection = initialSelection
         self.initialDetailOpen = initialDetailOpen
@@ -42,7 +44,7 @@ public struct ShellHostView: View {
                             importGameButton: AnyView(importButton))
                     .disabled(model.launchingGame || model.resigningGame || model.importingPackage)
                     .sheet(item: $model.sharingPackage) { entry in
-                        GamePackageShareView(entry: entry)
+                        GamePackageShareView(entry: entry, gameTunnel: gameTunnel)
                     }
                     .sheet(isPresented: $receivingPackage, onDismiss: { receiverPresented = false }) {
                         GamePackageReceiveView(model: model) { receivingPackage = false }

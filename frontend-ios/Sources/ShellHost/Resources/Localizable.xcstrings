@@ -1281,6 +1281,70 @@
         }
       }
     },
+    "Allow internet transfer": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Internetübertragung erlauben"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow internet transfer"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permitir transferencia por internet"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Autoriser le transfert par Internet"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Consenti trasferimento via Internet"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "インターネット転送を許可"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "인터넷 전송 허용"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permitir transferência pela internet"
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tillåt överföring via internet"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许互联网传输"
+          }
+        }
+      }
+    },
     "Allow this import": {
       "localizations": {
         "de": {
@@ -2429,6 +2493,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "清除"
+          }
+        }
+      }
+    },
+    "Cloudflare can read transferred game data. Anyone with the link can download it.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflare kann die übertragenen Spieldaten lesen. Jeder mit dem Link kann sie herunterladen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflare can read transferred game data. Anyone with the link can download it."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflare puede leer los datos del juego transferidos. Cualquiera que tenga el enlace puede descargarlos."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflare peut lire les données de jeu transférées. Toute personne disposant du lien peut les télécharger."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflare può leggere i dati di gioco trasferiti. Chiunque abbia il link può scaricarli."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflareは転送されるゲームデータを読み取れます。リンクを知っている人は誰でもダウンロードできます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflare는 전송되는 게임 데이터를 읽을 수 있습니다. 링크가 있는 사람은 누구나 다운로드할 수 있습니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A Cloudflare pode ler os dados do jogo transferidos. Qualquer pessoa com o link pode baixá-los."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflare kan läsa överförda speldata. Alla med länken kan ladda ner dem."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cloudflare 可以读取传输的游戏数据。任何持有链接的人都可以下载。"
           }
         }
       }
@@ -4605,6 +4733,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "正在链接游戏二进制文件"
+          }
+        }
+      }
+    },
+    "Local network": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lokales Netzwerk"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local network"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Red local"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Réseau local"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rete locale"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルネットワーク"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로컬 네트워크"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rede local"
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lokalt nätverk"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "局域网"
           }
         }
       }
@@ -6849,6 +7041,70 @@
         }
       }
     },
+    "Scan or paste this link in NX2Apple on another device. Keep this screen open until the transfer finishes.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scanne diesen Link oder füge ihn in NX2Apple auf einem anderen Gerät ein. Lass diesen Bildschirm bis zum Ende der Übertragung geöffnet."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan or paste this link in NX2Apple on another device. Keep this screen open until the transfer finishes."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Escanea este enlace o pégalo en NX2Apple en otro dispositivo. Mantén esta pantalla abierta hasta que termine la transferencia."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scannez ce lien ou collez-le dans NX2Apple sur un autre appareil. Gardez cet écran ouvert jusqu’à la fin du transfert."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scansiona questo link o incollalo in NX2Apple su un altro dispositivo. Tieni aperta questa schermata fino al termine del trasferimento."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "別のデバイスでこのリンクをスキャンするか、NX2Appleに貼り付けてください。転送が完了するまでこの画面を開いたままにしてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다른 기기에서 이 링크를 스캔하거나 NX2Apple에 붙여넣으세요. 전송이 끝날 때까지 이 화면을 열어 두세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Escaneie este link ou cole-o no NX2Apple em outro dispositivo. Mantenha esta tela aberta até a transferência terminar."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skanna länken eller klistra in den i NX2Apple på en annan enhet. Håll den här skärmen öppen tills överföringen är klar."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在另一台设备上扫描此链接或将其粘贴到 NX2Apple。请保持此页面开启，直到传输完成。"
+          }
+        }
+      }
+    },
     "Settings list damaged": {
       "localizations": {
         "de": {
@@ -7421,6 +7677,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "分享链接"
+          }
+        }
+      }
+    },
+    "Share over the internet": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Über das Internet teilen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share over the internet"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartir por internet"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Partager sur Internet"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Condividi via Internet"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "インターネットで共有"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "인터넷으로 공유"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartilhar pela internet"
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dela via internet"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过互联网分享"
           }
         }
       }

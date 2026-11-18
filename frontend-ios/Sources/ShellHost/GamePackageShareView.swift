@@ -11,7 +11,9 @@ struct GamePackageShareView: View {
     let entry: GamePackageLibrary.Entry
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @State private var server = GamePackageShareServer()
+    let gameTunnel: GamePackageTunnelFactory?
+    @State private var server: GamePackageShareServer?
+    @State private var remote: Bool?
     @State private var previousIdleTimerDisabled: Bool?
     @State private var url: URL?
     @State private var error: String?
@@ -20,10 +22,17 @@ struct GamePackageShareView: View {
         NavigationStack {
             VStack(spacing: 24) {
                 Text(verbatim: entry.manifest.name).font(.headline)
-                if let url, let image = qrCode(url.absoluteString) {
+                if remote == nil {
+                    Button(hostText("Local network")) { remote = false }
+                    if gameTunnel != nil {
+                        Text(hostText("Cloudflare can read transferred game data. Anyone with the link can download it."))
+                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        Button(hostText("Share over the internet")) { remote = true }
+                    }
+                } else if let url, let image = qrCode(url.absoluteString) {
                     Image(decorative: image, scale: 1).interpolation(.none).resizable()
                         .scaledToFit().frame(maxWidth: 280, maxHeight: 280).padding(12).background(.white)
-                    Text(hostText("Scan on another device on the same network. Keep this screen open until the transfer finishes."))
+                    Text(hostText(remote == true ? "Scan or paste this link in NX2Apple on another device. Keep this screen open until the transfer finishes." : "Scan on another device on the same network. Keep this screen open until the transfer finishes."))
                         .foregroundStyle(.secondary).multilineTextAlignment(.center)
                     ShareLink(item: url) { Label(hostText("Share link"), systemImage: "link") }
                 } else if let error {
@@ -36,18 +45,23 @@ struct GamePackageShareView: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button(hostText("Done")) { dismiss() } } }
         }
         .tint(ShellPalette.cream).preferredColorScheme(.dark)
-        .task {
+        .task(id: remote) {
+            guard !Task.isCancelled, let remote else { return }
             #if os(iOS)
             previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
             UIApplication.shared.isIdleTimerDisabled = true
             #endif
-            do { url = try await server.start(directory: entry.directory) }
-            catch { if !Task.isCancelled { self.error = error.localizedDescription } }
+            let server = GamePackageShareServer(tunnel: remote ? gameTunnel?() : nil)
+            self.server = server
+            do {
+                try Task.checkCancellation()
+                url = try await server.start(directory: entry.directory, remote: remote)
+            } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
             if Task.isCancelled { await server.stop() }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
-                Task { await server.stop() }
+                Task { await server?.stop() }
                 dismiss()
             }
         }
@@ -58,7 +72,7 @@ struct GamePackageShareView: View {
             }
             previousIdleTimerDisabled = nil
             #endif
-            Task { await server.stop() }
+            Task { await server?.stop() }
         }
     }
 
@@ -80,6 +94,11 @@ struct GamePackageReceiveView: View {
     @State private var error: String?
     @State private var pickingPackage = false
     @State private var scanning = false
+    @State private var allowInternet = false
+
+    private var internetLink: Bool {
+        URL(string: link.trimmingCharacters(in: .whitespacesAndNewlines))?.scheme == "https"
+    }
 
     var body: some View {
         NavigationStack {
@@ -97,13 +116,19 @@ struct GamePackageReceiveView: View {
                         Button(hostText("Scan QR code")) { scanning = true }.disabled(receiving)
                     }
                     #endif
+                    if internetLink {
+                        Toggle(hostText("Allow internet transfer"), isOn: $allowInternet)
+                            .accessibilityIdentifier("sharing.allowInternet").disabled(receiving)
+                        Text(hostText("Cloudflare can read transferred game data. Anyone with the link can download it."))
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     Button { receiving = true } label: {
                         HStack {
                             Text(hostText("Receive game"))
                             Spacer()
                             if receiving { ProgressView() }
                         }
-                    }.disabled(receiving || link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }.disabled(receiving || (internetLink && !allowInternet) || link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     if receiving { ProgressView(value: progress).accessibilityLabel(hostText("Receiving game")) }
                 }
                 if let error { Section { Text(verbatim: error).textSelection(.enabled) } }
@@ -121,6 +146,7 @@ struct GamePackageReceiveView: View {
             case .failure(let failure): error = failure.localizedDescription
             }
         }
+        .onChange(of: link) { _, _ in allowInternet = false }
         .task(id: receiving) {
             guard receiving else { return }
             defer { receiving = false }
@@ -135,7 +161,7 @@ struct GamePackageReceiveView: View {
                 guard let url = URL(string: link.trimmingCharacters(in: .whitespacesAndNewlines)) else {
                     throw GamePackageError.invalid(hostText("Invalid sharing link"))
                 }
-                let client = try GamePackageShareClient(url: url)
+                let client = try GamePackageShareClient(url: url, remote: allowInternet)
                 try await withTaskCancellationHandler {
                     try await model.receivePackage(client) { bytes, total in
                         Task { @MainActor in progress = total > 0 ? Double(bytes) / Double(total) : 0 }

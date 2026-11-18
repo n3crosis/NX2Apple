@@ -2546,5 +2546,10 @@
   "ios.host.sharing.invalid": "유효하지 않은 공유 링크",
   "ios.host.sharing.share_link": "링크 공유",
   "ios.host.sharing.instructions": "같은 네트워크의 다른 기기에서 스캔하세요. 전송이 완료될 때까지 이 화면을 열어 두세요.",
-  "ios.host.sharing.title": "게임 공유"
+  "ios.host.sharing.title": "게임 공유",
+  "ios.host.sharing.local": "로컬 네트워크",
+  "ios.host.sharing.internet": "인터넷으로 공유",
+  "ios.host.sharing.disclosure": "Cloudflare는 전송되는 게임 데이터를 읽을 수 있습니다. 링크가 있는 사람은 누구나 다운로드할 수 있습니다.",
+  "ios.host.sharing.remote_instructions": "다른 기기에서 이 링크를 스캔하거나 NX2Apple에 붙여넣으세요. 전송이 끝날 때까지 이 화면을 열어 두세요.",
+  "ios.host.sharing.allow_internet": "인터넷 전송 허용"
 }

@@ -2547,5 +2547,10 @@
   "ios.host.sharing.invalid": "Ungültiger Freigabelink",
   "ios.host.sharing.share_link": "Link teilen",
   "ios.host.sharing.instructions": "Auf einem anderen Gerät im selben Netzwerk scannen. Diesen Bildschirm bis zum Ende der Übertragung geöffnet lassen.",
-  "ios.host.sharing.title": "Spiel teilen"
+  "ios.host.sharing.title": "Spiel teilen",
+  "ios.host.sharing.local": "Lokales Netzwerk",
+  "ios.host.sharing.internet": "Über das Internet teilen",
+  "ios.host.sharing.disclosure": "Cloudflare kann die übertragenen Spieldaten lesen. Jeder mit dem Link kann sie herunterladen.",
+  "ios.host.sharing.remote_instructions": "Scanne diesen Link oder füge ihn in NX2Apple auf einem anderen Gerät ein. Lass diesen Bildschirm bis zum Ende der Übertragung geöffnet.",
+  "ios.host.sharing.allow_internet": "Internetübertragung erlauben"
 }
