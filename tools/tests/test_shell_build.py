@@ -218,7 +218,7 @@ class NxkitShellPackageTests(unittest.TestCase):
             out = Path(tmp)
             (out / 'Gen').mkdir()
             (out / 'runtime-build.log').write_text('note: native-static-libs: -framework Metal -lc++\n')
-            env = dict(os.environ, NXKIT_RUNTIME_REVISION='a' * 40, NXKIT_RUNTIME_ABI='1',
+            env = dict(os.environ, SHELL_PLATFORM='ios', NXKIT_RUNTIME_REVISION='a' * 40, NXKIT_RUNTIME_ABI='1',
                        NXKIT_ARTIFACT_DIR=str(out / 'Rust'), NXKIT_BUILDER_SOURCE=str(out / 'Builder'))
             subprocess.run([sys.executable, '-I', '-', str(SCRIPT.parent / 'project-shell.yml'), tmp],
                            input=generator, text=True, env=env, check=True)
@@ -228,6 +228,33 @@ class NxkitShellPackageTests(unittest.TestCase):
             self.assertIn('public.filename-extension: [nxb]', project)
             self.assertIn('NXKitRuntimeRevision: "' + 'a' * 40 + '"', project)
             self.assertNotIn('# @FRAMEWORKS@', project)
+
+    def test_catalyst_validation_does_not_require_or_export_signing(self):
+        script = (SCRIPT.parent / 'build_nxkit_shell.sh').read_text()
+        platform = script.split('case "$SHELL_PLATFORM" in', 1)[1].split('mkdir -p "$SHELL_DIR"', 1)[0]
+        build = script.split('cd "$S"\nxcodegen generate', 1)[1]
+        commands = """set -eu
+xcodebuild() { printf '%s\\n' "$@" > "$S/arguments"; }
+codesign() { touch "$S/signed"; }
+ditto() { touch "$S/exported"; }
+""" + 'case "$SHELL_PLATFORM" in' + platform + build
+        for mode, identity in [('--prepare-xcode', ''), ('--build-unsigned', ''), ('--build', ''), ('--build', 'Fixture')]:
+            with self.subTest(mode=mode, identity=identity), tempfile.TemporaryDirectory() as tmp:
+                env = dict(os.environ, MODE=mode, SHELL_PLATFORM='maccatalyst', S=tmp,
+                           DM_TEAM_ID='FIXTURE' if identity else '0000000000', DM_SIGNING_IDENTITY=identity)
+                result = subprocess.run(['bash', '-c', commands], env=env, capture_output=True, text=True)
+                if mode == '--build' and not identity:
+                    self.assertNotEqual(result.returncode, 0)
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                out = Path(tmp)
+                self.assertEqual((out / 'signed').exists(), mode == '--build')
+                self.assertEqual((out / 'exported').exists(), mode == '--build')
+                if mode != '--prepare-xcode':
+                    expected = 'YES' if identity else 'NO'
+                    self.assertIn('CODE_SIGNING_ALLOWED=' + expected, (out / 'arguments').read_text())
+                else:
+                    self.assertFalse((out / 'arguments').exists())
 
     @unittest.skipUnless(sys.platform == 'darwin', 'IPA archive uses macOS ditto')
     def test_ipa_contains_payload_app_and_preserves_original(self):

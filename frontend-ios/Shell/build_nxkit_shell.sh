@@ -6,11 +6,12 @@
 # SHELL_DIR: generated project/artifacts outside the repository. No engine or game data is copied.
 # --prepare-xcode builds Rust and generates the project; --build also packages an unsigned device IPA for signing/sideloading.
 # SHELL_PLATFORM=maccatalyst builds the same UIKit shell as a native Mac app.
-# A Mac build requires DM_TEAM_ID and DM_SIGNING_IDENTITY; game payloads remain separate.
+# --build-unsigned checks a Catalyst build without signing or exporting a distributable app.
+# A signed Mac --build requires DM_TEAM_ID and DM_SIGNING_IDENTITY; game payloads remain separate.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
 MODE=${1:-}
-case "$MODE" in --prepare-xcode|--build) ;; *) echo "usage: $0 --prepare-xcode | --build" >&2; exit 1;; esac
+case "$MODE" in --prepare-xcode|--build|--build-unsigned) ;; *) echo "usage: $0 --prepare-xcode | --build | --build-unsigned" >&2; exit 1;; esac
 : "${NXKIT_RUNTIME_ABI:?set the producer/runtime ABI}"
 : "${SHELL_DIR:?set SHELL_DIR outside the repository}"
 [ "$(uname -s)" = Darwin ] || { echo 'An Apple SDK is required to build the runtime and shell.' >&2; exit 1; }
@@ -25,16 +26,19 @@ case "$SHELL_PLATFORM" in
   maccatalyst)
     RUST_TARGET=aarch64-apple-ios-macabi; APPLE_SDK=macosx
     DESTINATION='generic/platform=macOS,variant=Mac Catalyst'
-    : "${DM_SIGNING_IDENTITY:?set a certificate signing identity for the Mac shell}"
-    [ "$DM_TEAM_ID" != 0000000000 ] || { echo 'Set DM_TEAM_ID for the Mac shell.' >&2; exit 1; }
+    if [ "$MODE" = --build ]; then
+      : "${DM_SIGNING_IDENTITY:?set a certificate signing identity for the Mac shell}"
+      [ "$DM_TEAM_ID" != 0000000000 ] || { echo 'Set DM_TEAM_ID for the Mac shell.' >&2; exit 1; }
+    fi
     ;;
   *) echo 'SHELL_PLATFORM must be ios or maccatalyst.' >&2; exit 1 ;;
 esac
+[ "$MODE" != --build-unsigned ] || [ "$SHELL_PLATFORM" = maccatalyst ] || { echo '--build-unsigned is for Catalyst validation only.' >&2; exit 1; }
 mkdir -p "$SHELL_DIR"
 S=$(cd "$SHELL_DIR" && pwd)
 REPO=$(cd "$ROOT/../.." && pwd)
 case "$S/" in "$REPO/"*) echo 'SHELL_DIR must be outside the repository.' >&2; exit 1;; esac
-PIN=dc01fa2d277c9b71c7a5cf430630e60a4ad2c51e
+PIN=5e84a342486131bbc2d9397424efb105c6150584
 UPSTREAM=${NXKIT_SOURCE:-$S/Upstream}
 if [ ! -d "$UPSTREAM/.git" ]; then
   [ -z "${NXKIT_SOURCE:-}" ] || { echo 'NXKIT_SOURCE must be a git checkout.' >&2; exit 1; }
@@ -142,9 +146,9 @@ archive_dir = os.environ['NXKIT_ARTIFACT_DIR']
 PY
 cd "$S"
 xcodegen generate
-if [ "$MODE" = --build ]; then
+if [ "$MODE" != --prepare-xcode ]; then
   SIGNING=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=)
-  if [ "$SHELL_PLATFORM" = maccatalyst ]; then
+  if [ "$SHELL_PLATFORM" = maccatalyst ] && [ "$MODE" = --build ]; then
     SIGNING=(CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES "CODE_SIGN_IDENTITY=$DM_SIGNING_IDENTITY")
   fi
   xcodebuild -project DmShell.xcodeproj -scheme DmShell -configuration Release \
@@ -153,6 +157,10 @@ if [ "$MODE" = --build ]; then
     > "$S/build.log" 2>&1
   if [ "$SHELL_PLATFORM" = maccatalyst ]; then
     APP="$S/dd/Build/Products/Release-maccatalyst/DmShell.app"
+    if [ "$MODE" = --build-unsigned ]; then
+      echo "Unsigned validation build only: $APP (not for installation or distribution)"
+      exit 0
+    fi
     codesign --verify --strict "$APP"
     ditto --norsrc "$APP" "$S/DmShell.app"
     echo "Signed Mac shell: $S/DmShell.app"

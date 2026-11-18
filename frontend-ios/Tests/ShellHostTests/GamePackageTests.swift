@@ -14,7 +14,7 @@ import Security
         await model.prepareNextExternalPackage()
         #expect(model.hasExternalPackage)
         #expect(model.packagePreview?.id == current.id)
-        #expect(FileManager.default.fileExists(atPath: current.archive.path))
+        #expect(FileManager.default.fileExists(atPath: current.directory.path))
         model.cancelPackageImport()
         model.importingSigningIdentity = true
         await model.prepareNextExternalPackage()

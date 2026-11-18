@@ -3,6 +3,12 @@ import Security
 @testable import ShellHost
 
 final class ShellSigningIdentityTests: XCTestCase {
+    @MainActor func testSigningFileExtensions() {
+        XCTAssertEqual(ShellSigningIdentityView.fileExtensions(isProfile: true),
+                       ["mobileprovision", "provisionprofile"])
+        XCTAssertEqual(ShellSigningIdentityView.fileExtensions(isProfile: false), ["p12"])
+    }
+
     func testImportedIdentityReadIsBoundedAndRejectsNonFiles() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)

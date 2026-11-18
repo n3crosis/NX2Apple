@@ -2089,3 +2089,15 @@ index 4d061f3..d70b6cb 100644
  }
  
  /// Prints a line of the log of the take-overs.
+diff --git a/crates/nxkit-svc-system/src/sys.rs b/crates/nxkit-svc-system/src/sys.rs
+index 4566a84..dfc20f2 100644
+--- a/crates/nxkit-svc-system/src/sys.rs
++++ b/crates/nxkit-svc-system/src/sys.rs
+@@ -30,5 +30,5 @@ struct RawTm {
+
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ const CLOCK_MONOTONIC: c_int = 6;
+-#[cfg(not(target_os = "macos"))]
++#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+ const CLOCK_MONOTONIC: c_int = 1;
