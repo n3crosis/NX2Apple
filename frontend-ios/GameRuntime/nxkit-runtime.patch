@@ -1,0 +1,2091 @@
+diff --git a/crates/nxkit-coreml/Cargo.toml b/crates/nxkit-coreml/Cargo.toml
+index fc00723..592a3e7 100644
+--- a/crates/nxkit-coreml/Cargo.toml
++++ b/crates/nxkit-coreml/Cargo.toml
+@@ -11,7 +11,7 @@ publish.workspace = true
+ layer = "L0"
+ in_v = false
+ 
+-[target.'cfg(target_os = "macos")'.dependencies]
++[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+ block2 = { workspace = true, features = ["std"] }
+ objc2 = { workspace = true, features = ["std", "exception"] }
+ objc2-core-foundation = { workspace = true, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+diff --git a/crates/nxkit-coreml/src/lib.rs b/crates/nxkit-coreml/src/lib.rs
+index 2c98e04..56fc816 100644
+--- a/crates/nxkit-coreml/src/lib.rs
++++ b/crates/nxkit-coreml/src/lib.rs
+@@ -14,7 +14,7 @@
+ //!
+ //! The crate builds on macOS only. On other systems it is empty, so the workspace still builds there.
+ 
+-#![cfg(target_os = "macos")]
++#![cfg(any(target_os = "macos", target_os = "ios"))]
+ 
+ mod cache;
+ mod error;
+diff --git a/crates/nxkit-gpu/Cargo.toml b/crates/nxkit-gpu/Cargo.toml
+index 6bb427f..51cfd8b 100644
+--- a/crates/nxkit-gpu/Cargo.toml
++++ b/crates/nxkit-gpu/Cargo.toml
+@@ -11,7 +11,7 @@ publish.workspace = true
+ layer = "L2"
+ in_v = false
+ 
+-[target.'cfg(target_os = "macos")'.dependencies]
++[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+ nxkit-abi = { workspace = true }
+ nxkit-coreml = { workspace = true }
+ nxkit-metal = { workspace = true }
+diff --git a/crates/nxkit-gpu/src/lib.rs b/crates/nxkit-gpu/src/lib.rs
+index 853ccc3..5bf681d 100644
+--- a/crates/nxkit-gpu/src/lib.rs
++++ b/crates/nxkit-gpu/src/lib.rs
+@@ -11,7 +11,7 @@
+ //! - `diag` holds the opt-in diagnostics (`NXKIT_DIAG`, `NXKIT_KNOB`), see `docs/diagnostics.md`. The render health
+ //!   report lives in `nxkit_nvn::diag`.
+ 
+-#![cfg(target_os = "macos")]
++#![cfg(any(target_os = "macos", target_os = "ios"))]
+ 
+ mod diag;
+ pub(crate) use diag::{buf_skip, diag, knob, nobar, nobar_range, refresh_knobs, tex_skip, watched};
+diff --git a/crates/nxkit-hos/src/events.rs b/crates/nxkit-hos/src/events.rs
+index 67134b2..30b44f0 100644
+--- a/crates/nxkit-hos/src/events.rs
++++ b/crates/nxkit-hos/src/events.rs
+@@ -151,11 +151,24 @@ impl Kernel {
+     /// `CancelSynchronization`: ends the thread's `WaitSynchronization`, or its next one.
+     pub fn cancel_synchronization(&self, handle: u32) -> KResultOr<()> {
+         let t = self.thread_by_handle(handle)?;
+-        t.cancel.store(true, Ordering::SeqCst);
+-        let kind = lock(&t.wait_kind);
+-        if *kind == WaitKind::Sync {
+-            t.parker.wake(KResult::CANCELLED);
+-        }
++        cancel_sync(&t);
+         Ok(())
+     }
++
++    /// Cancels each registered thread's current or next synchronization wait.
++    /// Other waits are not woken. This does not stop threads or release their memory.
++    pub fn cancel_synchronization_waits(&self) {
++        let threads = lock(&self.threads).clone();
++        for thread in threads {
++            cancel_sync(&thread);
++        }
++    }
++}
++
++fn cancel_sync(t: &Thread) {
++    t.cancel.store(true, Ordering::SeqCst);
++    let kind = lock(&t.wait_kind);
++    if *kind == WaitKind::Sync {
++        t.parker.wake(KResult::CANCELLED);
++    }
+ }
+diff --git a/crates/nxkit-hos/src/gate.rs b/crates/nxkit-hos/src/gate.rs
+index e6dd3e2..71c7303 100644
+--- a/crates/nxkit-hos/src/gate.rs
++++ b/crates/nxkit-hos/src/gate.rs
+@@ -10,7 +10,7 @@
+ use crate::sys;
+ use crate::thread::{Thread, lock};
+ use std::sync::Mutex;
+-use std::sync::atomic::{AtomicU32, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+ use std::time::Instant;
+ 
+ const PRIORITIES: usize = 64;
+@@ -19,15 +19,20 @@ const IDLE: u32 = PRIORITIES as u32;
+ 
+ struct CoreGate {
+     best: AtomicU32,
++    stopped: AtomicBool,
+     counts: Mutex<[u32; PRIORITIES]>,
+ }
+ 
+ impl CoreGate {
+     fn publish(&self, counts: &[u32; PRIORITIES]) {
+-        let best = counts
+-            .iter()
+-            .position(|n| *n > 0)
+-            .map_or(IDLE, |i| i as u32);
++        let best = if self.stopped.load(Ordering::Relaxed) {
++            IDLE
++        } else {
++            counts
++                .iter()
++                .position(|n| *n > 0)
++                .map_or(IDLE, |i| i as u32)
++        };
+         if self.best.swap(best, Ordering::SeqCst) != best {
+             sys::wake_all(&self.best);
+         }
+@@ -48,6 +53,7 @@ impl CoreGates {
+     pub(crate) fn new(enabled: bool) -> CoreGates {
+         let gate = || CoreGate {
+             best: AtomicU32::new(IDLE),
++            stopped: AtomicBool::new(false),
+             counts: Mutex::new([0; PRIORITIES]),
+         };
+         CoreGates {
+@@ -56,6 +62,16 @@ impl CoreGates {
+         }
+     }
+ 
++    /// Permanently releases priority waits without removing runnable-thread accounting.
++    /// Publishing under the counts lock prevents a concurrent enter from restoring a blocking word.
++    pub(crate) fn release_waits(&self) {
++        for gate in &self.cores {
++            let counts = lock(&gate.counts);
++            gate.stopped.store(true, Ordering::Relaxed);
++            gate.publish(&counts);
++        }
++    }
++
+     /// Marks `t` runnable and waits until no higher-priority thread is runnable on its core.
+     pub(crate) fn enter(&self, t: &Thread) {
+         if !self.enabled {
+@@ -120,3 +136,45 @@ impl CoreGates {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::thread::ThreadState;
++    use std::sync::{Arc, mpsc};
++    use std::time::Duration;
++
++    #[test]
++    fn stop_releases_current_and_future_priority_waits_without_losing_counts() {
++        let gates = Arc::new(CoreGates::new(true));
++        let high = Thread::new(1, "high", 0, 10, 0, 1, ThreadState::Started);
++        let low = Arc::new(Thread::new(2, "low", 0, 30, 0, 1, ThreadState::Started));
++        gates.enter(&high);
++        let g = gates.clone();
++        let t = low.clone();
++        let (tx, rx) = mpsc::channel();
++        let worker = std::thread::spawn(move || {
++            g.enter(&t);
++            g.leave(&t);
++            // A later entry must not re-enable priority blocking.
++            g.enter(&t);
++            g.leave(&t);
++            tx.send(()).unwrap();
++        });
++        let deadline = Instant::now() + Duration::from_secs(2);
++        while lock(&low.gate_slot).is_none() && Instant::now() < deadline {
++            std::thread::yield_now();
++        }
++        assert!(lock(&low.gate_slot).is_some());
++        assert!(rx.try_recv().is_err());
++        gates.release_waits();
++        rx.recv_timeout(Duration::from_secs(2))
++            .expect("priority waiter released");
++        worker.join().unwrap();
++        gates.set_priority(&high, 5);
++        gates.leave(&high);
++        gates.release_waits();
++        assert_eq!(*lock(&gates.cores[0].counts), [0; PRIORITIES]);
++        assert_eq!(gates.cores[0].best.load(Ordering::SeqCst), IDLE);
++    }
++}
+diff --git a/crates/nxkit-hos/src/kernel/mod.rs b/crates/nxkit-hos/src/kernel/mod.rs
+index 376b341..3ce683f 100644
+--- a/crates/nxkit-hos/src/kernel/mod.rs
++++ b/crates/nxkit-hos/src/kernel/mod.rs
+@@ -13,7 +13,7 @@ use crate::stats::{StatsSnapshot, format_stats};
+ use crate::svc::GuestLauncher;
+ use crate::sys;
+ use crate::sysevent::SystemEvents;
+-use crate::thread::{Thread, ThreadState, Timeout, lock};
++use crate::thread::{Thread, ThreadState, Timeout, WaitKind, lock};
+ use crate::vm::{MemoryConfig, Vm};
+ use crate::waitq::WaitTable;
+ use std::cell::RefCell;
+@@ -140,6 +140,8 @@ pub struct Kernel {
+     pub(crate) addresses: WaitTable,
+     pub(crate) gates: CoreGates,
+     pub(crate) threads: Mutex<Vec<Arc<Thread>>>,
++    thread_admission_closed: AtomicBool,
++    sleep_waits_cancelled: AtomicBool,
+     next_id: AtomicU64,
+     unknown_logged: AtomicBool,
+     me: Weak<Kernel>,
+@@ -183,6 +185,8 @@ impl Kernel {
+             condvars: WaitTable::new(),
+             addresses: WaitTable::new(),
+             threads: Mutex::new(Vec::new()),
++            thread_admission_closed: AtomicBool::new(false),
++            sleep_waits_cancelled: AtomicBool::new(false),
+             next_id: AtomicU64::new(0x51),
+             unknown_logged: AtomicBool::new(false),
+             me: me.clone(),
+@@ -410,8 +414,29 @@ impl Kernel {
+             std::thread::yield_now();
+             return;
+         }
+-        cur.parker.prepare();
++        {
++            let mut kind = lock(&cur.wait_kind);
++            if self.sleep_waits_cancelled.load(Ordering::Acquire) {
++                return;
++            }
++            cur.parker.prepare();
++            *kind = WaitKind::Sleep;
++        }
+         self.block_on(cur, Timeout::from_ns(ns), || true);
++        *lock(&cur.wait_kind) = WaitKind::None;
++    }
++
++    /// Ends current sleeps and prevents future sleeps from blocking during host shutdown.
++    /// Unlike guest `CancelSynchronization`, this is permanent and does not affect other waits.
++    pub fn cancel_sleep_waits(&self) {
++        self.sleep_waits_cancelled.store(true, Ordering::Release);
++        let threads = lock(&self.threads).clone();
++        for thread in threads {
++            let kind = lock(&thread.wait_kind);
++            if *kind == WaitKind::Sleep {
++                thread.parker.wake(KResult::CANCELLED);
++            }
++        }
+     }
+ 
+     /// Blocks `cur` on its parker. `on_timeout` runs when the timeout ends and says whether the thread took
+diff --git a/crates/nxkit-hos/src/kernel/spawn.rs b/crates/nxkit-hos/src/kernel/spawn.rs
+index c63bd3c..1a719cc 100644
+--- a/crates/nxkit-hos/src/kernel/spawn.rs
++++ b/crates/nxkit-hos/src/kernel/spawn.rs
+@@ -39,6 +39,7 @@ impl Kernel {
+         priority: i32,
+         core: i32,
+     ) -> KResultOr<Arc<Thread>> {
++        self.admit_thread()?;
+         let spec = ThreadSpec {
+             name: name.to_string(),
+             entry: 0,
+@@ -92,6 +93,7 @@ impl Kernel {
+ 
+     /// `StartThread`.
+     pub fn start_thread(&self, handle: u32) -> KResultOr<()> {
++        self.admit_thread()?;
+         let t = self.thread_by_handle(handle)?;
+         if t.state() != ThreadState::Created {
+             return Err(KResult::INVALID_STATE);
+@@ -134,6 +136,26 @@ impl Kernel {
+         Ok(())
+     }
+ 
++    /// Rejects subsequent thread starts and attachments. Requests admitted before this
++    /// call can still complete. This does not stop existing threads or permit memory release.
++    pub fn close_thread_admission(&self) {
++        self.thread_admission_closed.store(true, Ordering::Release);
++    }
++
++    /// Permanently releases priority gates so stopped threads can finish wait cleanup.
++    /// This does not cancel object waits, stop threads or permit memory release.
++    pub fn release_priority_waits(&self) {
++        self.gates.release_waits();
++    }
++
++    fn admit_thread(&self) -> KResultOr<()> {
++        if self.thread_admission_closed.load(Ordering::Acquire) {
++            Err(KResult::INVALID_STATE)
++        } else {
++            Ok(())
++        }
++    }
++
+     /// `ExitThread`. Marks the thread as exited and signals the threads that wait for it. The host's svc gate then
+     /// ends the host thread. Calling it twice does nothing. The lend table closes first, while the host thread still
+     /// runs (see `lend.rs`), and the thread-local slot goes back to the free list. The thread must not read its
+diff --git a/crates/nxkit-hos/src/thread.rs b/crates/nxkit-hos/src/thread.rs
+index 7dba275..3fda0e5 100644
+--- a/crates/nxkit-hos/src/thread.rs
++++ b/crates/nxkit-hos/src/thread.rs
+@@ -147,11 +147,12 @@ impl SyncObject {
+     }
+ }
+ 
+-/// What a thread is waiting in, so that a cancel wakes only a synchronization wait.
++/// Tagged waits, so cancellation never wakes an unrelated lock or address wait.
+ #[derive(Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum WaitKind {
+     None,
+     Sync,
++    Sleep,
+ }
+ 
+ /// The run state of a thread.
+diff --git a/crates/nxkit-hos/tests/objects.rs b/crates/nxkit-hos/tests/objects.rs
+index 3a2422a..ba1205d 100644
+--- a/crates/nxkit-hos/tests/objects.rs
++++ b/crates/nxkit-hos/tests/objects.rs
+@@ -372,3 +372,163 @@ fn a_higher_class_waiter_can_block_on_a_lower_class_owner() {
+     w.join(&[owner, waiter]);
+     assert_eq!(w.load(0), 0);
+ }
++
++#[test]
++fn closing_thread_admission_rejects_starts_without_interrupting_running_threads() {
++    use std::sync::mpsc;
++
++    let w = world();
++    let (release_tx, release_rx) = mpsc::channel();
++    let h = w.spawn("running", 30, 0, move |_| {
++        release_rx.recv().expect("release running thread");
++    });
++    let late = w
++        .kernel
++        .create_thread(nxkit_hos::ThreadSpec {
++            name: "late".into(),
++            entry: 0,
++            priority: 30,
++            core: 0,
++            stack_size: 0,
++            body: Box::new(|| unreachable!("closed admission")),
++        })
++        .expect("create dormant thread");
++    w.kernel.close_thread_admission();
++    w.kernel.close_thread_admission();
++    assert!(matches!(
++        w.kernel.attach_current_thread("late", 30, 0),
++        Err(KResult::INVALID_STATE)
++    ));
++    assert_eq!(w.kernel.start_thread(late), Err(KResult::INVALID_STATE));
++    release_tx.send(()).expect("release thread");
++    w.join(&[h]);
++}
++
++#[test]
++fn cancel_all_sync_waits_handles_closed_threads_and_removes_registrations() {
++    let w = world();
++    let (_, r1) = w.kernel.create_event().expect("event");
++    let (_, r2) = w.kernel.create_event().expect("event");
++    let k = w.kernel.clone();
++    let (tx, rx) = std::sync::mpsc::channel();
++    let (cancelled, release) = std::sync::mpsc::channel();
++    w.spawn("waiter", 30, 0, move |t| {
++        k.close_handle(t.handle()).expect("close own handle");
++        let refs = Arc::strong_count(t);
++        let result = k.wait_synchronization(t, &[r1, r2], Timeout::Infinite);
++        release
++            .recv_timeout(Duration::from_secs(2))
++            .expect("cancellation finished");
++        tx.send((result, refs, Arc::strong_count(t)))
++            .expect("result");
++    });
++    w.wait_until("parked", || w.blocked() >= 1);
++    w.kernel.close_thread_admission();
++    w.kernel.cancel_synchronization_waits();
++    cancelled.send(()).expect("release reference check");
++    let (result, before, after) = rx.recv_timeout(Duration::from_secs(2)).expect("cancelled");
++    assert_eq!(result, Err(KResult::CANCELLED));
++    assert_eq!(before, after, "event queues retain no waiter references");
++    assert_eq!(
++        w.kernel
++            .wait_synchronization(&w.main, &[r1], Timeout::Immediate),
++        Err(KResult::CANCELLED),
++        "a thread not yet waiting receives the pending cancellation"
++    );
++}
++
++#[test]
++fn cancelling_sync_waits_does_not_wake_lock_waiters() {
++    let w = world();
++    let addr = w.addr(0);
++    let owner = w.main.handle();
++    w.store(0, owner | nxkit_hos::WAITERS_BIT);
++    let k = w.kernel.clone();
++    let (tx, rx) = std::sync::mpsc::channel();
++    let waiter = w.spawn("lock waiter", 30, 0, move |t| {
++        tx.send(k.arbitrate_lock(t, owner, addr, t.handle()))
++            .expect("result");
++    });
++    w.wait_until("lock waiter parked", || w.blocked() >= 1);
++    w.kernel.cancel_synchronization_waits();
++    let early = rx.recv_timeout(Duration::from_millis(30));
++    assert_eq!(w.kernel.arbitrate_unlock(addr), Ok(()));
++    assert_eq!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
++    assert_eq!(
++        rx.recv_timeout(Duration::from_secs(2)).expect("handoff"),
++        Ok(())
++    );
++    assert_eq!(w.load(0), waiter);
++}
++
++#[test]
++fn host_stop_cancels_closed_handle_sleep_and_not_the_following_lock_wait() {
++    let w = world();
++    let addr = w.addr(0);
++    let owner = w.main.handle();
++    w.store(0, owner | nxkit_hos::WAITERS_BIT);
++    let k = w.kernel.clone();
++    let (tx, rx) = std::sync::mpsc::channel();
++    let h = w.spawn("sleeper", 30, 0, move |t| {
++        k.close_handle(t.handle()).expect("close own handle");
++        k.sleep_thread(t, 60_000_000_000);
++        tx.send(()).unwrap();
++        k.arbitrate_lock(t, owner, addr, t.handle()).unwrap();
++        tx.send(()).unwrap();
++    });
++    w.wait_until("sleeping", || w.blocked() == 1);
++    w.kernel.cancel_sleep_waits();
++    rx.recv_timeout(Duration::from_secs(2))
++        .expect("sleep ended");
++    w.wait_until("lock waiting", || w.blocked() == 1);
++    w.kernel.cancel_sleep_waits();
++    let early = rx.recv_timeout(Duration::from_millis(20));
++    w.kernel.arbitrate_unlock(addr).unwrap();
++    assert_eq!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
++    rx.recv_timeout(Duration::from_secs(2))
++        .expect("lock handoff");
++    assert_eq!(w.load(0), h);
++}
++
++#[test]
++fn host_sleep_cancellation_is_not_lost_during_registration_or_consumed() {
++    for _ in 0..64 {
++        let w = world();
++        let k = w.kernel.clone();
++        let (tx, rx) = std::sync::mpsc::channel();
++        let barrier = Arc::new(std::sync::Barrier::new(2));
++        let b = barrier.clone();
++        w.spawn("sleeper", 30, 0, move |t| {
++            b.wait();
++            k.sleep_thread(t, 60_000_000_000);
++            // Stop is persistent, not a one-shot wake.
++            k.sleep_thread(t, 60_000_000_000);
++            tx.send(()).unwrap();
++        });
++        barrier.wait();
++        w.kernel.cancel_sleep_waits();
++        rx.recv_timeout(Duration::from_secs(2))
++            .expect("both sleeps ended");
++    }
++}
++
++#[test]
++fn guest_sync_cancellation_does_not_end_sleep_or_get_consumed_by_it() {
++    let w = world();
++    let k = w.kernel.clone();
++    let (tx, rx) = std::sync::mpsc::channel();
++    let h = w.spawn("sleeper", 30, 0, move |t| {
++        k.sleep_thread(t, 60_000_000_000);
++        tx.send(k.wait_synchronization(t, &[], Timeout::Immediate))
++            .unwrap();
++    });
++    w.wait_until("sleeping", || w.blocked() == 1);
++    w.kernel.cancel_synchronization(h).unwrap();
++    let early = rx.recv_timeout(Duration::from_millis(20));
++    w.kernel.cancel_sleep_waits();
++    assert_eq!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
++    assert_eq!(
++        rx.recv_timeout(Duration::from_secs(2)).unwrap(),
++        Err(KResult::CANCELLED)
++    );
++}
+diff --git a/crates/nxkit-host/Cargo.toml b/crates/nxkit-host/Cargo.toml
+index c857af1..ce123c6 100644
+--- a/crates/nxkit-host/Cargo.toml
++++ b/crates/nxkit-host/Cargo.toml
+@@ -13,6 +13,7 @@ in_v = false
+ 
+ [lib]
+ name = "nxkit_host"
++crate-type = ["rlib", "staticlib"]
+ path = "src/lib.rs"
+ 
+ [[bin]]
+@@ -33,15 +34,17 @@ nxkit-svc-pacing = { workspace = true }
+ nxkit-svc-system = { workspace = true }
+ nxkit-nvn = { workspace = true }
+ 
+-[target.'cfg(target_os = "macos")'.dependencies]
++[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+ nxkit-metal = { path = "../nxkit-metal" }
+ nxkit-gpu = { workspace = true }
+ objc2 = { workspace = true, features = ["std"] }
+-objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSCursor", "NSEvent", "NSControl", "NSGraphics", "NSProgressIndicator", "NSResponder", "NSRunningApplication", "NSScreen", "NSText", "NSTextField", "NSView", "NSWindow", "objc2-core-foundation", "objc2-quartz-core"] }
+ objc2-core-foundation = { workspace = true, features = ["std", "CFCGTypes"] }
+ objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSLocale", "NSNotification", "NSObject", "NSProcessInfo", "NSString"] }
+ objc2-quartz-core = { workspace = true, features = ["std", "CALayer", "CAMetalLayer"] }
+ 
++[target.'cfg(target_os = "macos")'.dependencies]
++objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSCursor", "NSEvent", "NSControl", "NSGraphics", "NSProgressIndicator", "NSResponder", "NSRunningApplication", "NSScreen", "NSText", "NSTextField", "NSView", "NSWindow", "objc2-core-foundation", "objc2-quartz-core"] }
++
+ # Not `workspace = true`: `unsafe` is denied for the crate and allowed in the module `sys` (libc, dyld, Mach and AppKit
+ # calls) and in the module `gate` (the assembly of the gates).
+ [lints.rust]
+diff --git a/crates/nxkit-host/src/frames.rs b/crates/nxkit-host/src/frames.rs
+index 0c23df0..90fbeab 100644
+--- a/crates/nxkit-host/src/frames.rs
++++ b/crates/nxkit-host/src/frames.rs
+@@ -38,7 +38,7 @@ const SHADERS: &str = "shaders";
+ 
+ /// The settings of the GPU backend, from the keys of `game.json` that the encoder uses. `enc_thread` moves the encode
+ /// of each frame to a thread of its own. A game of the Switch 2 gets its order inside a GOB.
+-pub fn gpu_settings(root: &Path, settings: &Settings) -> GpuSettings {
++pub fn gpu_settings(root: &Path, settings: &Settings, cache_root: Option<&Path>) -> GpuSettings {
+     GpuSettings {
+         shader_dir: root.join(SHADERS),
+         // The archive is loaded whenever the build made one: `pso_mtl4` came from the engine's profiles, and a title
+@@ -73,7 +73,9 @@ pub fn gpu_settings(root: &Path, settings: &Settings) -> GpuSettings {
+         enc_thread: settings.enc_thread,
+         overlap: settings.overlap,
+         // The runtime pipeline cache: what this run compiles is kept for the next start (`crate::pipecache`).
+-        runtime_cache: crate::pipecache::folder(root),
++        runtime_cache: cache_root
++            .map(Path::to_path_buf)
++            .or_else(|| crate::pipecache::folder(root)),
+         build_id: crate::pipecache::build_id(root),
+         gob_order: match platform::get() {
+             Platform::Nx => GobOrder::Tegra,
+@@ -175,11 +177,18 @@ pub fn install(
+     memory: &Arc<GuestMemory>,
+     root: &Path,
+     settings: &Settings,
++    cache_root: Option<&Path>,
+ ) -> Result<Arc<dyn FrameHooks>> {
+     crate::sys::exitflush::install();
+     // The encoder makes the pipelines of the recorded list before it returns; a long wait shows a loading screen.
++    #[cfg(target_os = "macos")]
+     nxkit_gpu::set_prewarm_screen(Some(Arc::new(crate::sys::loading::LoadingScreen)));
+-    let backend = GpuBackend::new(ctx, memory.clone(), &gpu_settings(root, settings));
++    let backend = GpuBackend::new(
++        ctx,
++        memory.clone(),
++        &gpu_settings(root, settings, cache_root),
++    );
++    #[cfg(target_os = "macos")]
+     nxkit_gpu::set_prewarm_screen(None);
+     let backend = backend.map_err(|e| HostError::App(format!("the GPU backend: {e}")))?;
+     nvn::install(backend.clone() as Arc<dyn Backend>, nvn_settings(settings))
+diff --git a/crates/nxkit-host/src/gate.rs b/crates/nxkit-host/src/gate.rs
+index 4338581..9d77ef5 100644
+--- a/crates/nxkit-host/src/gate.rs
++++ b/crates/nxkit-host/src/gate.rs
+@@ -245,12 +245,31 @@ pub fn stub_address(k: usize) -> u64 {
+ /// returning from `entry`. `sp` is the guest stack. The thread slots must be set up. `entry` gets `arg` in `x0` and
+ /// `arg1` in `x1`.
+ pub fn enter(entry: u64, arg: u64, arg1: u64, sp: u64) {
++    #[cfg(target_os = "ios")]
++    if finish_stopped_thread() {
++        return;
++    }
+     let mut save = [0u64; SAVE_WORDS];
+     SAVE.with(|s| s.set(save.as_mut_ptr() as usize));
+     // SAFETY: `entry` is guest code at a loaded address. `save` is live until the call returns, and the call returns
+     // only through `nxkit_thread_leave` with this same pointer.
+     unsafe { nxkit_thread_enter(entry, arg, sp, save.as_mut_ptr(), arg1) };
+     SAVE.with(|s| s.set(0));
++    #[cfg(target_os = "ios")]
++    finish_stopped_thread();
++}
++
++// Run cleanup after service handlers return and execution resumes on the original host stack.
++// Boot can call `enter` again, so a stopped thread must not re-enter guest code.
++#[cfg(target_os = "ios")]
++fn finish_stopped_thread() -> bool {
++    if !stop::requested() {
++        return false;
++    }
++    if let (Some(kernel), Some(thread)) = (nxkit_rt::kernel(), nxkit_hos::current_thread()) {
++        kernel.exit_thread(&thread);
++    }
++    true
+ }
+ 
+ /// Runs svc `number` through the kernel with registers `regs`, at least eight. Returns what `nxkit_svc` returns:
+@@ -304,6 +323,11 @@ extern "C" fn nxkit_gate_nested(sp: u64) -> ! {
+ }
+ 
+ fn svc(number: u32, regs: &mut [u64], ret: u64) {
++    #[cfg(target_os = "ios")]
++    if number == SVC_EXIT_PROCESS {
++        stop::request("the game called ExitProcess");
++        leave();
++    }
+     // SAFETY: `regs` holds 31 registers and `nxkit_svc` reads and writes the first eight.
+     let answered = unsafe { nxkit_rt::nxkit_svc(number, regs.as_mut_ptr()) };
+     match number {
+@@ -334,6 +358,12 @@ fn counter() -> u64 {
+ /// Called by the assembly on the gate stack. `ret` is the address the gate block returns to, `regs` the frame.
+ #[unsafe(no_mangle)]
+ extern "C" fn nxkit_gate_dispatch(ret: u64, regs: *mut u64) {
++    // Only leave at a gate boundary, never through a live service handler.
++    // Threads blocked in services or running without gates still retain their session.
++    #[cfg(target_os = "ios")]
++    if stop::requested() {
++        leave();
++    }
+     // SAFETY: the assembly passes its own frame, which holds x0..x30 as 31 words and is not shared.
+     let regs = unsafe { std::slice::from_raw_parts_mut(regs, 31) };
+     let Some(table) = TABLE.get() else {
+@@ -346,4 +376,8 @@ extern "C" fn nxkit_gate_dispatch(ret: u64, regs: *mut u64) {
+         Some(Kind::Spin) => std::thread::yield_now(),
+         None => stop::fatal(&format!("unknown gate at {ret:#x}")),
+     }
++    #[cfg(target_os = "ios")]
++    if stop::requested() {
++        leave();
++    }
+ }
+diff --git a/crates/nxkit-host/src/lib.rs b/crates/nxkit-host/src/lib.rs
+index f2d8778..88989ad 100644
+--- a/crates/nxkit-host/src/lib.rs
++++ b/crates/nxkit-host/src/lib.rs
+@@ -4,7 +4,7 @@
+ //! (`docs/architecture.md`, rule 5). The parts that talk to macOS exist on macOS only.
+ 
+ pub mod error;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod frames;
+ pub mod gates;
+ pub mod input_file;
+@@ -19,44 +19,46 @@ pub mod reloc;
+ pub mod settings;
+ pub mod stop;
+ 
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ #[allow(unsafe_code)]
+ pub mod bigstack;
+ 
+ /// The boot of the SDK on the main guest thread.
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod boot;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ #[allow(unsafe_code)]
+ pub mod gate;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod guestsym;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod loader;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod memory;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod memreport;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod place;
+ pub mod poolreport;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
++mod prepare;
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod probe;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod probe_pools;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod refresh;
+ #[cfg(target_os = "macos")]
+ pub mod run;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod seams;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ #[allow(unsafe_code)]
+ pub mod sys;
+ pub mod texreport;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod thread;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub mod wire;
+ 
+ pub use error::{HostError, Result};
+diff --git a/crates/nxkit-host/src/prepare.rs b/crates/nxkit-host/src/prepare.rs
+new file mode 100644
+index 0000000..bdb8a07
+--- /dev/null
++++ b/crates/nxkit-host/src/prepare.rs
+@@ -0,0 +1,88 @@
++//! Prepare one game before the platform starts its window or view.
++//!
++//! This does not own a reusable runtime. The kernel and guest mappings still live for the process.
++
++use std::path::Path;
++use std::sync::Arc;
++
++use nxkit_metal::{Context, GuestMemory};
++
++use crate::boot::Boot;
++use crate::error::{HostError, Result};
++use crate::layout::Layout;
++use crate::manifest::Game;
++use crate::settings::Settings;
++use crate::{guestsym, loader, place, seams, sys, thread};
++
++pub(crate) struct Prepared {
++    pub ctx: Context,
++    pub gpu_memory: Arc<GuestMemory>,
++    pub loaded: loader::Loaded,
++    pub boot: Boot,
++    pub layout: Layout,
++    pub settings: Settings,
++}
++
++fn check_kernel_service(mask: u64) -> Result<()> {
++    if mask & nxkit_rt::Service::Kernel.bit() == 0 {
++        return Err(HostError::Manifest(
++            "\"services\" must include \"kernel\", because every svc of the game goes through it"
++                .into(),
++        ));
++    }
++    Ok(())
++}
++
++pub(crate) fn prepare(root: &Path, writable_root: &Path) -> Result<Prepared> {
++    sys::crashsig::install();
++    let game = Game::read(root)?;
++    let mask = loader::service_mask(&game.services)?;
++    check_kernel_service(mask)?;
++    let placed = place::place(&game)?;
++    let mem = placed.mem;
++    let (layout, settings) = (mem.layout, placed.game.settings.clone());
++
++    // The GPU buffer comes first, while no page of the reservation is `PROT_NONE` (Metal refuses such a range).
++    let ctx = Context::system_default().map_err(|e| HostError::App(format!("Metal: {e}")))?;
++    let gpu_memory = Arc::new(mem.gpu_memory(&ctx)?);
++    mem.keep_gpu_pages();
++    mem.seal()?;
++    crate::memreport::start(&ctx, &layout);
++
++    nxkit_rt::nxkit_init(mask);
++    sys::kernel_init(thread::guest_thread_entry, &layout, &placed.game)?;
++    seams::register_kernel()?;
++    seams::register_server(mask)?;
++    seams::init_services(&placed.game, mask, writable_root)?;
++
++    let mut loaded = loader::load(placed, mask)?;
++    eprintln!(
++        "nxkit-host: {} modules loaded ({:?}), {} exports",
++        loaded.game.modules.len(),
++        loaded.placement,
++        loaded.exports.len()
++    );
++    sys::crashsig::set_modules(
++        loaded
++            .game
++            .modules
++            .iter()
++            .map(|m| {
++                let start = m.base.wrapping_add_signed(m.low);
++                (m.name.clone(), start, start + m.span)
++            })
++            .collect(),
++    );
++    nxkit_metal::set_pc_namer(sys::crashsig::guest_place);
++    guestsym::set(std::mem::take(&mut loaded.exports));
++    let boot = Boot::resolve(std::mem::take(&mut loaded.inits))?;
++
++    Ok(Prepared {
++        ctx,
++        gpu_memory,
++        loaded,
++        boot,
++        layout,
++        settings,
++    })
++}
+diff --git a/crates/nxkit-host/src/refresh.rs b/crates/nxkit-host/src/refresh.rs
+index 254f081..eb03283 100644
+--- a/crates/nxkit-host/src/refresh.rs
++++ b/crates/nxkit-host/src/refresh.rs
+@@ -9,7 +9,9 @@
+ use nxkit_svc_pacing::StepMode;
+ use std::sync::Mutex;
+ 
+-use nxkit_metal::{RateRange, display};
++use nxkit_metal::RateRange;
++#[cfg(target_os = "macos")]
++use nxkit_metal::display;
+ use nxkit_svc_pacing::refresh::{self, TickPlan};
+ 
+ use crate::settings::Settings;
+@@ -127,6 +129,7 @@ struct State {
+     plan: Option<TickPlan>,
+     announced: String,
+     /// The display ids that a switch was tried for with this rate, so that a failed switch does not repeat.
++    #[cfg(target_os = "macos")]
+     tried: Vec<(u32, u32)>,
+     /// The measured rates already reported, rounded to Hz.
+     reported: u32,
+@@ -147,6 +150,7 @@ static STATE: Mutex<State> = Mutex::new(State {
+     presentation: Presentation::Grid,
+     plan: None,
+     announced: String::new(),
++    #[cfg(target_os = "macos")]
+     tried: Vec::new(),
+     reported: 0,
+ });
+@@ -202,6 +206,7 @@ pub fn plan() -> Option<TickPlan> {
+ 
+ /// The refresh rate of the current mode of the screen, and where it came from.
+ fn refresh_of(facts: &ScreenFacts) -> (f64, &'static str) {
++    #[cfg(target_os = "macos")]
+     if let Some(hz) = facts.display.and_then(display::current_refresh_hz) {
+         return (hz, "CoreGraphics mode");
+     }
+@@ -210,7 +215,7 @@ fn refresh_of(facts: &ScreenFacts) -> (f64, &'static str) {
+         if facts.adaptive {
+             "adaptive, highest rate"
+         } else {
+-            "NSScreen"
++            "screen"
+         },
+     )
+ }
+@@ -220,7 +225,11 @@ fn refresh_of(facts: &ScreenFacts) -> (f64, &'static str) {
+ pub fn apply(facts: &ScreenFacts) -> TickPlan {
+     let mut st = state();
+     let req = st.request;
++    #[cfg(target_os = "macos")]
+     let mut note = String::new();
++    #[cfg(target_os = "ios")]
++    let note = "";
++    #[cfg(target_os = "macos")]
+     if let (Some(want), Some(id)) = (req.set_refresh, facts.display)
+         && !facts.adaptive
+         && !st.tried.contains(&(id, want))
+@@ -286,7 +295,11 @@ pub fn apply(facts: &ScreenFacts) -> TickPlan {
+     // Under variable refresh a frame shows as soon as it is ready, so a minimum duration would only hold it back.
+     let timed = req.timed.unwrap_or(false) && vrr.is_none();
+     nxkit_metal::set_timed_present(timed.then(|| 1.0 / f64::from(plan.fps.max(1))));
++    #[cfg(target_os = "macos")]
+     let mut hint = String::new();
++    #[cfg(target_os = "ios")]
++    let hint = "";
++    #[cfg(target_os = "macos")]
+     if !plan.exact {
+         let choices = facts
+             .display
+diff --git a/crates/nxkit-host/src/run.rs b/crates/nxkit-host/src/run.rs
+index c0e9fd4..2352a05 100644
+--- a/crates/nxkit-host/src/run.rs
++++ b/crates/nxkit-host/src/run.rs
+@@ -16,13 +16,9 @@
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ 
+-use nxkit_metal::Context;
+-
+-use crate::boot::Boot;
+-use crate::error::{HostError, Result};
+-use crate::manifest::Game;
++use crate::error::Result;
+ use crate::sys::appkit::{self, AppEvents, MouseEvent, MouseMode, WindowConfig};
+-use crate::{guestsym, loader, place, seams, stop, sys, thread};
++use crate::{seams, stop, thread};
+ 
+ /// What the command line asks for.
+ #[derive(Debug, Clone)]
+@@ -53,63 +49,19 @@ impl AppEvents for Events {
+     }
+ }
+ 
+-fn check_kernel_service(mask: u64) -> Result<()> {
+-    if mask & nxkit_rt::Service::Kernel.bit() == 0 {
+-        return Err(HostError::Manifest(
+-            "\"services\" must include \"kernel\", because every svc of the game goes through it"
+-                .into(),
+-        ));
+-    }
+-    Ok(())
+-}
+-
+ /// Runs the game. It returns when the window or the game has stopped.
+ pub fn run(opts: &Options) -> Result<()> {
+-    sys::crashsig::install();
+-    let game = Game::read(&opts.root)?;
+-    let mask = loader::service_mask(&game.services)?;
+-    check_kernel_service(mask)?;
+-    let placed = place::place(&game)?;
+-    let mem = placed.mem;
+-    let (layout, settings) = (mem.layout, placed.game.settings.clone());
+-
+-    // The GPU buffer comes first, while no page of the reservation is `PROT_NONE` (Metal refuses such a range).
+-    let ctx = Context::system_default().map_err(|e| HostError::App(format!("Metal: {e}")))?;
+-    let gpu_memory = Arc::new(mem.gpu_memory(&ctx)?);
+-    mem.keep_gpu_pages();
+-    mem.seal()?;
+-    crate::memreport::start(&ctx, &layout);
+-
+-    nxkit_rt::nxkit_init(mask);
+-    sys::kernel_init(thread::guest_thread_entry, &layout, &placed.game)?;
+-    seams::register_kernel()?;
+-    seams::register_server(mask)?;
+-    seams::init_services(&placed.game, mask)?;
+-
+-    let mut loaded = loader::load(placed, mask)?;
+-    eprintln!(
+-        "nxkit-host: {} modules loaded ({:?}), {} exports",
+-        loaded.game.modules.len(),
+-        loaded.placement,
+-        loaded.exports.len()
+-    );
+-    sys::crashsig::set_modules(
+-        loaded
+-            .game
+-            .modules
+-            .iter()
+-            .map(|m| {
+-                let start = m.base.wrapping_add_signed(m.low);
+-                (m.name.clone(), start, start + m.span)
+-            })
+-            .collect(),
+-    );
+-    nxkit_metal::set_pc_namer(sys::crashsig::guest_place);
+-    guestsym::set(std::mem::take(&mut loaded.exports));
+-    let boot = Boot::resolve(std::mem::take(&mut loaded.inits))?;
++    let crate::prepare::Prepared {
++        ctx,
++        gpu_memory,
++        loaded,
++        boot,
++        layout,
++        settings,
++    } = crate::prepare::prepare(&opts.root, &opts.root)?;
+ 
+     crate::refresh::configure(crate::refresh::Request::from_settings(&settings));
+-    let hooks = seams::frame_hooks(&ctx, &gpu_memory, &opts.root, &settings)?;
++    let hooks = seams::frame_hooks(&ctx, &gpu_memory, &opts.root, &settings, None)?;
+     let window = WindowConfig {
+         title: format!("nxkit {} {}", loaded.game.title_id, loaded.game.version),
+         size: None,
+diff --git a/crates/nxkit-host/src/seams.rs b/crates/nxkit-host/src/seams.rs
+index 91da38a..5d089d3 100644
+--- a/crates/nxkit-host/src/seams.rs
++++ b/crates/nxkit-host/src/seams.rs
+@@ -16,6 +16,7 @@ use nxkit_svc_pacing::{LoadConfig, StepMode};
+ use crate::error::{HostError, Result};
+ use crate::manifest::Game;
+ use crate::settings::Settings;
++#[cfg(target_os = "macos")]
+ use crate::sys::appkit::{MouseEvent, MouseMode};
+ use crate::{guestsym, wire};
+ 
+@@ -202,7 +203,7 @@ fn console_language() -> String {
+ /// parameter, the display version, the shared font facts and the DLC folder, input the pad layout, the focus and the
+ /// input files (`input_file.rs`), audio and video their host seams and pacing the step mode with the state page. The
+ /// lookup of the game's own symbols is set in all of them (`guestsym.rs`).
+-pub fn init_services(game: &Game, mask: u64) -> Result<()> {
++pub fn init_services(game: &Game, mask: u64, writable_root: &Path) -> Result<()> {
+     let s = &game.settings;
+     let handheld = s.op_mode == "handheld";
+     wire::set_handheld(handheld);
+@@ -214,8 +215,8 @@ pub fn init_services(game: &Game, mask: u64) -> Result<()> {
+     .map_err(HostError::App)?;
+ 
+     if has(mask, Service::Fs) {
+-        let save = game.root.join("save").join(&game.title_id);
+-        let temp = game.root.join("temp");
++        let save = writable_root.join("save").join(&game.title_id);
++        let temp = writable_root.join("temp");
+         for dir in [&save, &temp] {
+             std::fs::create_dir_all(dir).map_err(|e| HostError::io(dir, &e))?;
+         }
+@@ -304,6 +305,7 @@ pub fn focus_changed(focused: bool) {
+ }
+ 
+ /// The held mouse did something. The input service turns it into the camera stick and the mouse bindings.
++#[cfg(target_os = "macos")]
+ pub fn mouse(event: MouseEvent) {
+     match event {
+         MouseEvent::Moved { dx, dy } => nxkit_svc_input::mouse_moved(dx, dy),
+@@ -315,6 +317,7 @@ pub fn mouse(event: MouseEvent) {
+ 
+ /// When the window holds the mouse: never when the input files turn the mouse off, on a click while a controller is
+ /// connected, else whenever the window has the focus (R63).
++#[cfg(target_os = "macos")]
+ pub fn mouse_mode() -> MouseMode {
+     if !nxkit_svc_input::mouse_capture() {
+         MouseMode::Off
+@@ -335,6 +338,7 @@ pub fn frame_hooks(
+     memory: &Arc<GuestMemory>,
+     root: &std::path::Path,
+     settings: &Settings,
++    cache_root: Option<&Path>,
+ ) -> Result<Arc<dyn FrameHooks>> {
+-    crate::frames::install(ctx, memory, root, settings)
++    crate::frames::install(ctx, memory, root, settings, cache_root)
+ }
+diff --git a/crates/nxkit-host/src/stop.rs b/crates/nxkit-host/src/stop.rs
+index fc1bd9f..e92f228 100644
+--- a/crates/nxkit-host/src/stop.rs
++++ b/crates/nxkit-host/src/stop.rs
+@@ -1,11 +1,12 @@
+-//! Process stop. Any thread asks, the main thread ends the application, and a watchdog ends the process when that
+-//! does not happen.
++//! Stop requests from guest threads. Desktop hosts terminate the process.
++//! The embedded iOS host only records the request and leaves the application alive.
+ 
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Once, OnceLock};
+ use std::time::Duration;
+ 
+ /// How long the application gets to stop before the watchdog ends the process.
++#[cfg(not(target_os = "ios"))]
+ const GRACE: Duration = Duration::from_secs(5);
+ 
+ fn cell() -> &'static Arc<AtomicBool> {
+@@ -23,12 +24,20 @@ pub fn requested() -> bool {
+     cell().load(Ordering::Acquire)
+ }
+ 
+-/// Asks the host to stop. The reason goes to stderr. The first call arms the watchdog.
++/// Asks the host to stop. The reason goes to stderr. Desktop hosts also arm the watchdog.
+ pub fn request(why: &str) {
+     static ARM: Once = Once::new();
+     ARM.call_once(|| {
+         eprintln!("nxkit-host: stopping, {why}");
+         cell().store(true, Ordering::Release);
++        #[cfg(target_os = "ios")]
++        if let Some(kernel) = nxkit_rt::kernel() {
++            kernel.close_thread_admission();
++            kernel.release_priority_waits();
++            kernel.cancel_synchronization_waits();
++            kernel.cancel_sleep_waits();
++        }
++        #[cfg(not(target_os = "ios"))]
+         std::thread::spawn(|| {
+             std::thread::sleep(GRACE);
+             eprintln!(
+@@ -47,8 +56,15 @@ pub fn park_forever() -> ! {
+     }
+ }
+ 
+-/// Ends the process with an error message. Used where the host cannot go on and cannot return an error (R15).
++/// Reports a fatal error where the caller cannot return (R15).
++/// Desktop hosts exit. On iOS the calling guest thread parks after requesting a stop.
+ pub fn fatal(message: &str) -> ! {
+     eprintln!("nxkit-host: fatal: {message}");
++    #[cfg(not(target_os = "ios"))]
+     std::process::exit(2);
++    #[cfg(target_os = "ios")]
++    {
++        request(message);
++        park_forever();
++    }
+ }
+diff --git a/crates/nxkit-host/src/sys/ios.rs b/crates/nxkit-host/src/sys/ios.rs
+new file mode 100644
+index 0000000..850ec9d
+--- /dev/null
++++ b/crates/nxkit-host/src/sys/ios.rs
+@@ -0,0 +1,127 @@
++//! One game in a UIKit-owned Metal layer.
++//!
++//! The runtime remains process-scoped. A launch attempt consumes it even if preparation fails.
++//! Dropping the view stops presentation, not guest threads. Restart the process before another game.
++
++use std::ffi::c_void;
++use std::path::Path;
++use std::ptr::NonNull;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, Ordering};
++
++use nxkit_metal::{DisplayLink, FrameHooks, FrameInterval, LinkRate, Presenter};
++use objc2::MainThreadMarker;
++
++use crate::error::{HostError, Result};
++use crate::{prepare, refresh, seams, stop, thread};
++
++static STARTED: AtomicBool = AtomicBool::new(false);
++
++/// The presentation of the one game in this process. Keep it alive while the game is visible.
++pub struct GameView {
++    link: DisplayLink,
++    presenter: Presenter,
++}
++
++/// Prepared runtime state. Build it off the main thread, then attach the view on the main thread.
++pub struct PreparedGame {
++    game: prepare::Prepared,
++    hooks: Arc<dyn FrameHooks>,
++}
++
++impl PreparedGame {
++    /// Loads the game and builds pipelines. The native library must already be signed.
++    /// writable_root holds device-local saves and temporary files, outside the payload.
++    pub fn new(root: &Path, writable_root: &Path) -> Result<Self> {
++        let root = root.canonicalize().map_err(|e| HostError::io(root, &e))?;
++        std::fs::create_dir_all(writable_root).map_err(|e| HostError::io(writable_root, &e))?;
++        let writable_root = writable_root
++            .canonicalize()
++            .map_err(|e| HostError::io(writable_root, &e))?;
++        if writable_root.starts_with(&root) {
++            return Err(HostError::App(
++                "writable storage must be outside the game payload".into(),
++            ));
++        }
++        if STARTED.swap(true, Ordering::AcqRel) {
++            return Err(HostError::App(
++                "restart the process before starting another game".into(),
++            ));
++        }
++        let game = prepare::prepare(&root, &writable_root)?;
++        refresh::configure(refresh::Request::from_settings(&game.settings));
++        let hooks = seams::frame_hooks(
++            &game.ctx,
++            &game.gpu_memory,
++            &root,
++            &game.settings,
++            Some(&writable_root),
++        )?;
++        Ok(Self { game, hooks })
++    }
++}
++
++impl GameView {
++    /// Attaches prepared state to the main UIKit run loop and starts its guest thread.
++    ///
++    /// # Safety
++    ///
++    /// layer must point to a live CAMetalLayer. It is retained by the presenter.
++    pub unsafe fn attach(
++        prepared: PreparedGame,
++        layer: NonNull<c_void>,
++        width: u32,
++        height: u32,
++        screen: &refresh::ScreenFacts,
++    ) -> Result<Self> {
++        let mtm = MainThreadMarker::new()
++            .ok_or_else(|| HostError::App("the game view must attach on the main thread".into()))?;
++        if width == 0 || height == 0 {
++            return Err(HostError::App("the game view has no drawable area".into()));
++        }
++        let PreparedGame { game, hooks } = prepared;
++        // SAFETY: the caller supplies a live CAMetalLayer. The presenter retains it.
++        let presenter = unsafe { Presenter::from_raw_layer(&game.ctx, layer) }
++            .map_err(|e| HostError::App(format!("the presenter: {e}")))?;
++        presenter.resize(width, height);
++        let plan = refresh::apply(screen);
++        let rate = match refresh::vrr_range() {
++            Some(range) => LinkRate::Variable(range),
++            None => LinkRate::Fixed(FrameInterval::from_hz(plan.link_hz)),
++        };
++        let link = DisplayLink::new(mtm, &presenter, rate, hooks);
++        nxkit_svc_input::set_virtual_pad(Some(nxkit_svc_input::VirtualPad::default()));
++        thread::start_main(game.boot, game.layout.main_stack.end())?;
++        // Loaded mappings and service state stay alive for the process, as in the desktop runner.
++        drop(game.loaded);
++        Ok(Self { link, presenter })
++    }
++
++    /// Updates the layer's drawable size in pixels.
++    pub fn resize(&self, width: u32, height: u32) {
++        self.presenter.resize(width, height);
++    }
++
++    /// Pauses presentation and reports foreground state to the game and its input service.
++    pub fn set_active(&self, active: bool) {
++        self.link.set_paused(!active);
++        nxkit_svc_input::set_focus(active);
++        nxkit_svc_system::set_focus(if active {
++            nxkit_svc_system::Focus::InFocus
++        } else {
++            nxkit_svc_input::set_touches(&[]);
++            nxkit_svc_input::set_virtual_pad(Some(nxkit_svc_input::VirtualPad::default()));
++            nxkit_svc_system::Focus::OutOfFocus
++        });
++    }
++
++    /// Updates touch points in normalized game-view coordinates.
++    pub fn set_touches(&self, points: &[nxkit_svc_input::Touch]) {
++        nxkit_svc_input::set_touches(points);
++    }
++
++    /// Whether the guest asked to stop. This does not mean all guest threads have exited.
++    pub fn stopped(&self) -> bool {
++        stop::requested()
++    }
++}
+diff --git a/crates/nxkit-host/src/sys/ios_ffi.rs b/crates/nxkit-host/src/sys/ios_ffi.rs
+new file mode 100644
+index 0000000..c173b13
+--- /dev/null
++++ b/crates/nxkit-host/src/sys/ios_ffi.rs
+@@ -0,0 +1,246 @@
++//! C calls for the single UIKit game view. Preparation may run off the main thread.
++
++use std::cell::RefCell;
++use std::ffi::{CStr, c_char, c_void};
++use std::panic::{AssertUnwindSafe, catch_unwind};
++use std::path::Path;
++use std::ptr::NonNull;
++
++use objc2::MainThreadMarker;
++
++use super::ios::{GameView, PreparedGame};
++use std::sync::Mutex;
++
++static PREPARED: Mutex<Option<PreparedGame>> = Mutex::new(None);
++use crate::refresh::ScreenFacts;
++
++thread_local! {
++    static VIEW: RefCell<Option<GameView>> = const { RefCell::new(None) };
++}
++
++unsafe fn call(
++    main_thread: bool,
++    error: *mut c_char,
++    capacity: usize,
++    f: impl FnOnce() -> Result<(), String>,
++) -> i32 {
++    let result = if main_thread && MainThreadMarker::new().is_none() {
++        Err("runtime calls must use the main thread".into())
++    } else {
++        catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err("runtime panicked".into()))
++    };
++    let (code, message) = match result {
++        Ok(()) => (0, String::new()),
++        Err(message) => (1, message),
++    };
++    if !error.is_null() && capacity > 0 {
++        let count = message.len().min(capacity - 1);
++        // SAFETY: the caller provides a writable buffer of capacity bytes.
++        unsafe {
++            std::ptr::copy_nonoverlapping(message.as_ptr(), error.cast(), count);
++            *error.add(count) = 0;
++        }
++    }
++    code
++}
++
++fn with_view(f: impl FnOnce(&GameView)) -> Result<(), String> {
++    VIEW.with(|cell| {
++        let view = cell.borrow();
++        let view = view.as_ref().ok_or("no game view is attached")?;
++        f(view);
++        Ok(())
++    })
++}
++
++#[unsafe(no_mangle)]
++unsafe extern "C" fn nxkit_ios_prepare(
++    root: *const c_char,
++    writable: *const c_char,
++    error: *mut c_char,
++    capacity: usize,
++) -> i32 {
++    // SAFETY: the caller supplies valid UTF-8 C strings and the documented error buffer.
++    unsafe {
++        call(false, error, capacity, || {
++            if root.is_null() || writable.is_null() {
++                return Err("game paths are null".into());
++            }
++            let root = CStr::from_ptr(root).to_str().map_err(|e| e.to_string())?;
++            let writable = CStr::from_ptr(writable)
++                .to_str()
++                .map_err(|e| e.to_string())?;
++            let game = PreparedGame::new(Path::new(root), Path::new(writable))
++                .map_err(|e| e.to_string())?;
++            *PREPARED.lock().map_err(|_| "prepared game lock poisoned")? = Some(game);
++            Ok(())
++        })
++    }
++}
++
++#[unsafe(no_mangle)]
++unsafe extern "C" fn nxkit_ios_attach(
++    layer: *mut c_void,
++    width: u32,
++    height: u32,
++    max_fps: u32,
++    adaptive: i32,
++    error: *mut c_char,
++    capacity: usize,
++) -> i32 {
++    // SAFETY: the caller supplies a live CAMetalLayer and the documented error buffer.
++    unsafe {
++        call(true, error, capacity, || {
++            let layer = NonNull::new(layer).ok_or("Metal layer is null")?;
++            let game = PREPARED
++                .lock()
++                .map_err(|_| "prepared game lock poisoned")?
++                .take()
++                .ok_or("no prepared game")?;
++            let screen = ScreenFacts {
++                name: "UIKit".into(),
++                display: None,
++                max_fps,
++                adaptive: adaptive != 0,
++            };
++            let view =
++                GameView::attach(game, layer, width, height, &screen).map_err(|e| e.to_string())?;
++            VIEW.with(|cell| *cell.borrow_mut() = Some(view));
++            Ok(())
++        })
++    }
++}
++
++#[unsafe(no_mangle)]
++unsafe extern "C" fn nxkit_ios_set_pad(
++    buttons: u64,
++    lx: f32,
++    ly: f32,
++    rx: f32,
++    ry: f32,
++    error: *mut c_char,
++    capacity: usize,
++) -> i32 {
++    // SAFETY: the caller supplies the documented error buffer.
++    unsafe {
++        call(true, error, capacity, || {
++            with_view(|_| {
++                nxkit_svc_input::set_virtual_pad(Some(nxkit_svc_input::VirtualPad {
++                    buttons,
++                    axes: [lx, ly, rx, ry],
++                }));
++            })
++        })
++    }
++}
++
++#[unsafe(no_mangle)]
++unsafe extern "C" fn nxkit_ios_resize(
++    width: u32,
++    height: u32,
++    error: *mut c_char,
++    capacity: usize,
++) -> i32 {
++    // SAFETY: the caller provides the documented error buffer.
++    unsafe {
++        call(true, error, capacity, || {
++            with_view(|view| view.resize(width, height))
++        })
++    }
++}
++
++#[unsafe(no_mangle)]
++unsafe extern "C" fn nxkit_ios_set_active(active: i32, error: *mut c_char, capacity: usize) -> i32 {
++    // SAFETY: the caller provides the documented error buffer.
++    unsafe {
++        call(true, error, capacity, || {
++            with_view(|view| view.set_active(active != 0))
++        })
++    }
++}
++
++#[unsafe(no_mangle)]
++unsafe extern "C" fn nxkit_ios_set_audio_paused(
++    paused: i32,
++    error: *mut c_char,
++    capacity: usize,
++) -> i32 {
++    // SAFETY: the caller provides the documented error buffer.
++    unsafe {
++        call(true, error, capacity, || {
++            nxkit_svc_audio::set_output_paused(paused != 0)
++        })
++    }
++}
++
++#[repr(C)]
++struct Touch {
++    id: u32,
++    x: f32,
++    y: f32,
++}
++
++#[unsafe(no_mangle)]
++unsafe extern "C" fn nxkit_ios_set_touches(
++    points: *const Touch,
++    count: usize,
++    error: *mut c_char,
++    capacity: usize,
++) -> i32 {
++    // SAFETY: the caller provides count readable touch records and the documented error buffer.
++    unsafe {
++        call(true, error, capacity, || {
++            if count > 16 || (count != 0 && points.is_null()) {
++                return Err("invalid touch array".into());
++            }
++            let points = if count == 0 {
++                &[]
++            } else {
++                std::slice::from_raw_parts(points, count)
++            };
++            let points: Vec<_> = points
++                .iter()
++                .map(|p| nxkit_svc_input::Touch {
++                    id: p.id,
++                    x: p.x,
++                    y: p.y,
++                })
++                .collect();
++            with_view(|view| view.set_touches(&points))
++        })
++    }
++}
++
++#[unsafe(no_mangle)]
++unsafe extern "C" fn nxkit_ios_detach(error: *mut c_char, capacity: usize) -> i32 {
++    // SAFETY: the caller provides the documented error buffer.
++    unsafe {
++        call(true, error, capacity, || {
++            PREPARED
++                .lock()
++                .map_err(|_| "prepared game lock poisoned")?
++                .take();
++            VIEW.with(|cell| {
++                if let Some(view) = cell.borrow_mut().take() {
++                    view.set_active(false);
++                    // Closing is permanent; background pauses use set_active instead.
++                    // A stop request does not mean existing guest threads have exited.
++                    crate::stop::request("game view closed");
++                }
++            });
++            Ok(())
++        })
++    }
++}
++
++#[unsafe(no_mangle)]
++extern "C" fn nxkit_ios_state() -> i32 {
++    if MainThreadMarker::new().is_none() {
++        return -1;
++    }
++    VIEW.with(|cell| match cell.borrow().as_ref() {
++        None => 0,
++        Some(view) if view.stopped() => 2,
++        Some(_) => 1,
++    })
++}
+diff --git a/crates/nxkit-host/src/sys/kernel.rs b/crates/nxkit-host/src/sys/kernel.rs
+index 582fe24..b58150c 100644
+--- a/crates/nxkit-host/src/sys/kernel.rs
++++ b/crates/nxkit-host/src/sys/kernel.rs
+@@ -102,7 +102,10 @@ pub fn kernel_init(
+         main_thread_core: game.main_thread.core,
+         main_thread_stack_size: game.main_thread.stack_size,
+         process_id: 0,
++        #[cfg(not(target_os = "ios"))]
+         process_exit: None,
++        #[cfg(target_os = "ios")]
++        process_exit: Some(process_exit),
+         memory: &memory,
+         core_mask: crate::npdm::core_mask(game).unwrap_or(0),
+     };
+@@ -113,3 +116,9 @@ pub fn kernel_init(
+         r => Err(HostError::App(format!("nxkit_kernel_init returned {r}"))),
+     }
+ }
++
++#[cfg(target_os = "ios")]
++extern "C" fn process_exit(code: u32) {
++    crate::stop::request(&format!("the game exited with code {code:#x}"));
++    crate::stop::park_forever();
++}
+diff --git a/crates/nxkit-host/src/sys/mod.rs b/crates/nxkit-host/src/sys/mod.rs
+index adebcbe..7e5d4b4 100644
+--- a/crates/nxkit-host/src/sys/mod.rs
++++ b/crates/nxkit-host/src/sys/mod.rs
+@@ -4,12 +4,19 @@
+ //! touches memory.
+ 
+ pub mod allocspy;
++#[cfg(target_os = "macos")]
+ pub mod appkit;
+ pub mod crashsig;
+ mod dylib;
+ pub mod exitflush;
++#[cfg(target_os = "ios")]
++pub mod ios;
++#[cfg(target_os = "ios")]
++mod ios_ffi;
+ mod kernel;
++#[cfg(target_os = "macos")]
+ pub mod loading;
++#[cfg(target_os = "macos")]
+ mod mouse;
+ pub mod paging;
+ pub mod vm;
+diff --git a/crates/nxkit-metal/Cargo.toml b/crates/nxkit-metal/Cargo.toml
+index c04e263..3543db2 100644
+--- a/crates/nxkit-metal/Cargo.toml
++++ b/crates/nxkit-metal/Cargo.toml
+@@ -15,7 +15,7 @@ in_v = false
+ # The index of the pipeline archive shards (`nxkit_abi::shards`), a file format the build writes and this crate reads.
+ nxkit-abi.workspace = true
+ 
+-[target.'cfg(target_os = "macos")'.dependencies]
++[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+ block2 = { workspace = true, features = ["std"] }
+ objc2 = { workspace = true, features = ["std", "exception"] }
+ objc2-core-foundation = { workspace = true, features = ["std", "CFCGTypes", "CFDate"] }
+diff --git a/crates/nxkit-metal/src/lib.rs b/crates/nxkit-metal/src/lib.rs
+index 8dbaac4..376c5d4 100644
+--- a/crates/nxkit-metal/src/lib.rs
++++ b/crates/nxkit-metal/src/lib.rs
+@@ -30,9 +30,9 @@
+ //!
+ //! The frame format comes from `nxkit-nvn`. This crate does not depend on it.
+ //!
+-//! The crate builds on macOS only. On other systems it is empty, so the workspace still builds there.
++//! The crate builds on macOS and iOS. On other systems it is empty.
+ 
+-#![cfg(target_os = "macos")]
++#![cfg(any(target_os = "macos", target_os = "ios"))]
+ 
+ mod address;
+ mod barrier;
+@@ -44,6 +44,7 @@ mod compute_icb;
+ mod databuf;
+ mod deswizzle;
+ mod device;
++#[cfg(target_os = "macos")]
+ pub mod display;
+ mod encode;
+ mod error;
+diff --git a/crates/nxkit-metal/src/pacing.rs b/crates/nxkit-metal/src/pacing.rs
+index a5df6b0..9fa3ced 100644
+--- a/crates/nxkit-metal/src/pacing.rs
++++ b/crates/nxkit-metal/src/pacing.rs
+@@ -1,9 +1,8 @@
+ //! Frame pacing with `CAMetalDisplayLink`.
+ //!
+ //! A [`DisplayLink`] calls [`FrameHooks::display_tick`] once per display refresh at the chosen rate. Each tick
+-//! carries the drawable that the layer reserved for it. `CAMetalDisplayLink` is available on macOS 14 and later.
+-//! There is no `CADisplayLink` fallback, because the SDK of this crate has `CAMetalDisplayLink` and the host
+-//! targets macOS 26 and later.
++//! carries the drawable that the layer reserved for it. The backend uses `CAMetalDisplayLink` on macOS and iOS.
++//! Both targets require OS version 26 or later for Metal 4.
+ //!
+ //! A [`Pacer`] is the `FrameHooks` that a host gives to the link. It takes the finished game frames
+ //! (`Pacer::game_frame_ready`), asks the [`TickScheduler`] what each tick shows and hands that to a [`TickSink`]. The
+diff --git a/crates/nxkit-metal/src/present.rs b/crates/nxkit-metal/src/present.rs
+index b81bbae..844f4d8 100644
+--- a/crates/nxkit-metal/src/present.rs
++++ b/crates/nxkit-metal/src/present.rs
+@@ -143,6 +143,7 @@ impl Presenter {
+     }
+ 
+     /// Turns the display sync of the layer on or off.
++    #[cfg(target_os = "macos")]
+     pub fn set_display_sync(&self, on: bool) {
+         self.layer.setDisplaySyncEnabled(on);
+     }
+diff --git a/crates/nxkit-metal/tests/gpu.rs b/crates/nxkit-metal/tests/gpu.rs
+index 48e865b..986b92d 100644
+--- a/crates/nxkit-metal/tests/gpu.rs
++++ b/crates/nxkit-metal/tests/gpu.rs
+@@ -1,5 +1,5 @@
+ //! Tests that need a real Metal 4 GPU. Without a device they print a message and pass.
+-#![cfg(target_os = "macos")]
++#![cfg(any(target_os = "macos", target_os = "ios"))]
+ #![allow(clippy::unwrap_used, clippy::expect_used)]
+ 
+ use std::sync::Arc;
+diff --git a/crates/nxkit-svc-audio/src/engine.rs b/crates/nxkit-svc-audio/src/engine.rs
+index 717d393..c7d0356 100644
+--- a/crates/nxkit-svc-audio/src/engine.rs
++++ b/crates/nxkit-svc-audio/src/engine.rs
+@@ -147,6 +147,8 @@ impl Slot {
+ enum OutState {
+     Unstarted,
+     Device(au::Output),
++    #[cfg(target_os = "ios")]
++    Paused(Option<au::Output>),
+     Silent,
+ }
+ 
+@@ -465,6 +467,36 @@ impl Mixer {
+         }
+     }
+ 
++    /// Suspends callbacks before the host deactivates its audio session.
++    #[cfg(target_os = "ios")]
++    pub(crate) fn set_output_paused(&self, paused: bool) -> Result<(), String> {
++        let mut out = self.out.lock().map_err(|_| "audio output lock poisoned")?;
++        if paused {
++            match &mut *out {
++                OutState::Device(unit) => {
++                    unit.set_paused(true)?;
++                    let previous = std::mem::replace(&mut *out, OutState::Unstarted);
++                    if let OutState::Device(unit) = previous {
++                        *out = OutState::Paused(Some(unit));
++                    }
++                }
++                OutState::Unstarted => *out = OutState::Paused(None),
++                _ => {}
++            }
++        } else if let OutState::Paused(unit) = &mut *out {
++            if let Some(unit) = unit {
++                unit.set_paused(false)?;
++            }
++            let previous = std::mem::replace(&mut *out, OutState::Unstarted);
++            if let OutState::Paused(Some(unit)) = previous {
++                *out = OutState::Device(unit);
++            }
++            drop(out);
++            self.ensure_output();
++        }
++        Ok(())
++    }
++
+     fn ensure_output(&self) {
+         let Ok(mut out) = self.out.lock() else { return };
+         if !matches!(*out, OutState::Unstarted) {
+diff --git a/crates/nxkit-svc-audio/src/lib.rs b/crates/nxkit-svc-audio/src/lib.rs
+index 1f10a04..31f5399 100644
+--- a/crates/nxkit-svc-audio/src/lib.rs
++++ b/crates/nxkit-svc-audio/src/lib.rs
+@@ -55,6 +55,13 @@ pub fn init(cfg: &Config) {
+     engine::mixer().configure(cfg.master_volume, cfg.silent_sink);
+ }
+ 
++/// Pauses device callbacks before deactivating AVAudioSession, or resumes them after activation.
++/// Call on the host control thread, never from the render callback.
++#[cfg(target_os = "ios")]
++pub fn set_output_paused(paused: bool) -> Result<(), String> {
++    engine::mixer().set_output_paused(paused)
++}
++
+ /// Both export lists: the ones that run on the guest stack and the ones that need a big stack.
+ fn lists() -> (Vec<Export>, Vec<Export>) {
+     let mut v = Vec::new();
+diff --git a/crates/nxkit-svc-audio/src/sys/au.rs b/crates/nxkit-svc-audio/src/sys/au.rs
+index 5640d7c..5af7e88 100644
+--- a/crates/nxkit-svc-audio/src/sys/au.rs
++++ b/crates/nxkit-svc-audio/src/sys/au.rs
+@@ -1,6 +1,6 @@
+-//! The output unit (AUHAL) on the default output device.
++//! Output audio: AUHAL on macOS, RemoteIO on iOS.
+ //!
+-//! The unit calls one closure on the device's real-time thread. The first call joins that thread to the `os_workgroup` of
++//! The unit calls one closure on the device's real-time thread. On macOS the first call joins that thread to the `os_workgroup` of
+ //! the device, so the scheduler treats it as part of the device's deadline (R20).
+ 
+ #![allow(unsafe_code)]
+@@ -8,7 +8,7 @@
+ /// The closure the device thread runs. It fills an interleaved stereo `f32` buffer with silence or sound.
+ pub type Fill = Box<dyn FnMut(&mut [f32]) + Send>;
+ 
+-#[cfg(target_vendor = "apple")]
++#[cfg(target_os = "macos")]
+ mod imp {
+     use super::Fill;
+     use objc2_audio_toolbox::{
+@@ -384,7 +384,176 @@ mod imp {
+     }
+ }
+ 
+-#[cfg(not(target_vendor = "apple"))]
++#[cfg(target_os = "ios")]
++mod imp {
++    use super::Fill;
++    use objc2_audio_toolbox::{
++        AudioComponentDescription, AudioComponentFindNext, AudioComponentInstance,
++        AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioOutputUnitStart,
++        AudioOutputUnitStop, AudioUnitInitialize, AudioUnitSetProperty, AudioUnitUninitialize,
++    };
++    use objc2_core_audio_types::{AudioBufferList, AudioStreamBasicDescription};
++    use std::ffi::c_void;
++    use std::ptr::NonNull;
++
++    /// Owns the RemoteIO unit and its callback. The host must activate AVAudioSession first.
++    pub struct Output {
++        unit: AudioComponentInstance,
++        fill: *mut Fill,
++    }
++
++    // SAFETY: the unit serializes callbacks; the owner only stops it before releasing the closure.
++    unsafe impl Send for Output {}
++    // SAFETY: shared access exposes no mutable state or audio-unit operations.
++    unsafe impl Sync for Output {}
++
++    unsafe extern "C-unwind" fn render(
++        refcon: NonNull<c_void>,
++        _flags: NonNull<objc2_audio_toolbox::AudioUnitRenderActionFlags>,
++        _stamp: NonNull<objc2_core_audio_types::AudioTimeStamp>,
++        _bus: u32,
++        _frames: u32,
++        data: *mut AudioBufferList,
++    ) -> i32 {
++        if data.is_null() {
++            return 0;
++        }
++        // SAFETY: RemoteIO supplies a valid buffer list for this callback.
++        let list = unsafe { &*data };
++        if list.mNumberBuffers == 0 {
++            return 0;
++        }
++        let buf = &list.mBuffers[0];
++        let len = (buf.mDataByteSize / 4) as usize;
++        if buf.mData.is_null() || len == 0 || !len.is_multiple_of(2) {
++            return 0;
++        }
++        // SAFETY: the configured format is interleaved stereo f32; the callback owns this buffer.
++        let out = unsafe { std::slice::from_raw_parts_mut(buf.mData.cast::<f32>(), len) };
++        // SAFETY: start retains the boxed closure until the unit has stopped and been disposed.
++        let fill = unsafe { &mut *refcon.as_ptr().cast::<Fill>() };
++        fill(out);
++        0
++    }
++
++    fn check(what: &str, status: i32) -> Result<(), String> {
++        if status == 0 {
++            Ok(())
++        } else {
++            Err(format!("{what} failed with status {status}"))
++        }
++    }
++
++    impl Output {
++        /// Starts stereo 48 kHz output through the host's active audio session.
++        pub fn start(fill: Fill) -> Result<Self, String> {
++            let desc = AudioComponentDescription {
++                componentType: 0x6175_6f75,
++                componentSubType: 0x7269_6f63,
++                componentManufacturer: 0x6170_706c,
++                componentFlags: 0,
++                componentFlagsMask: 0,
++            };
++            // SAFETY: a valid description and null starting component.
++            let component = unsafe { AudioComponentFindNext(std::ptr::null_mut(), &desc) };
++            if component.is_null() {
++                return Err("no RemoteIO output component".to_string());
++            }
++            let mut unit = std::ptr::null_mut();
++            // SAFETY: component is live and unit receives the new instance.
++            check("create the output unit", unsafe {
++                AudioComponentInstanceNew(component, &mut unit)
++            })?;
++            let output = Self {
++                unit,
++                fill: Box::into_raw(Box::new(fill)),
++            };
++            let format = AudioStreamBasicDescription {
++                mSampleRate: 48000.0,
++                mFormatID: 0x6c70_636d,
++                mFormatFlags: 1 | 8,
++                mBytesPerPacket: 8,
++                mFramesPerPacket: 1,
++                mBytesPerFrame: 8,
++                mChannelsPerFrame: 2,
++                mBitsPerChannel: 32,
++                mReserved: 0,
++            };
++            // SAFETY: format points to a complete ASBD; input scope, output bus 0.
++            check("set the stream format", unsafe {
++                AudioUnitSetProperty(
++                    unit,
++                    8,
++                    1,
++                    0,
++                    std::ptr::from_ref(&format).cast(),
++                    std::mem::size_of_val(&format) as u32,
++                )
++            })?;
++            #[repr(C)]
++            struct Callback {
++                proc_: *const c_void,
++                refcon: *mut c_void,
++            }
++            let callback = Callback {
++                proc_: render as *const c_void,
++                refcon: output.fill.cast(),
++            };
++            // SAFETY: callback matches AURenderCallbackStruct and remains valid through output.
++            check("set the render callback", unsafe {
++                AudioUnitSetProperty(
++                    unit,
++                    23,
++                    0,
++                    0,
++                    std::ptr::from_ref(&callback).cast(),
++                    std::mem::size_of_val(&callback) as u32,
++                )
++            })?;
++            // SAFETY: unit is configured and owned by output.
++            check("initialize the output unit", unsafe {
++                AudioUnitInitialize(unit)
++            })?;
++            // SAFETY: unit is initialized and its callback context is retained.
++            check("start the output unit", unsafe {
++                AudioOutputUnitStart(unit)
++            })?;
++            Ok(output)
++        }
++
++        /// Stops or restarts callbacks while retaining the configured output unit.
++        pub fn set_paused(&mut self, paused: bool) -> Result<(), String> {
++            // SAFETY: the mixer serializes control operations on this owned unit.
++            let status = unsafe {
++                if paused {
++                    AudioOutputUnitStop(self.unit)
++                } else {
++                    AudioOutputUnitStart(self.unit)
++                }
++            };
++            check("change the output unit state", status)
++        }
++
++        /// RemoteIO manages its render thread; no HAL workgroup is joined.
++        pub fn join_status(&self) -> Option<i32> {
++            None
++        }
++    }
++
++    impl Drop for Output {
++        fn drop(&mut self) {
++            // SAFETY: the unit is owned here. Disposing it ends callbacks before freeing their context.
++            unsafe {
++                AudioOutputUnitStop(self.unit);
++                AudioUnitUninitialize(self.unit);
++                AudioComponentInstanceDispose(self.unit);
++                drop(Box::from_raw(self.fill));
++            }
++        }
++    }
++}
++
++#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+ mod imp {
+     use super::Fill;
+ 
+diff --git a/crates/nxkit-svc-input/Cargo.toml b/crates/nxkit-svc-input/Cargo.toml
+index 6a94426..f173556 100644
+--- a/crates/nxkit-svc-input/Cargo.toml
++++ b/crates/nxkit-svc-input/Cargo.toml
+@@ -14,7 +14,7 @@ in_v = false
+ [dependencies]
+ nxkit-abi = { workspace = true }
+ 
+-[target.'cfg(target_os = "macos")'.dependencies]
++[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+ objc2 = { workspace = true, features = ["std"] }
+ objc2-core-foundation = { workspace = true, features = ["std"] }
+ objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSSet", "NSString"] }
+diff --git a/crates/nxkit-svc-input/src/lib.rs b/crates/nxkit-svc-input/src/lib.rs
+index cc08116..e961e8a 100644
+--- a/crates/nxkit-svc-input/src/lib.rs
++++ b/crates/nxkit-svc-input/src/lib.rs
+@@ -154,6 +154,31 @@ pub fn set_touches(points: &[Touch]) {
+     with(|input| input.set_touches(points));
+ }
+ 
++/// A host overlay controller. Button bits follow nn::hid::NpadButton.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct VirtualPad {
++    /// Buttons 0 through 15.
++    pub buttons: u64,
++    /// Left x/y and right x/y, from -1 to 1. Positive y points up.
++    pub axes: [f32; 4],
++}
++
++/// Sets player one's overlay controller. None disconnects it.
++pub fn set_virtual_pad(pad: Option<VirtualPad>) {
++    with(|input| {
++        input.virtual_pad = pad.map(|p| npad::RawPad {
++            buttons: p.buttons & 0xffff,
++            axes: p.axes.map(|v| {
++                if v.is_finite() {
++                    v.clamp(-1.0, 1.0)
++                } else {
++                    0.0
++                }
++            }),
++        })
++    });
++}
++
+ #[cfg(test)]
+ pub(crate) mod testutil {
+     use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+diff --git a/crates/nxkit-svc-input/src/state.rs b/crates/nxkit-svc-input/src/state.rs
+index db79c99..4078625 100644
+--- a/crates/nxkit-svc-input/src/state.rs
++++ b/crates/nxkit-svc-input/src/state.rs
+@@ -65,6 +65,7 @@ pub(crate) struct Input {
+     bindings: Bindings,
+     map: MotionMap,
+     platform: Platform,
++    pub(crate) virtual_pad: Option<RawPad>,
+     slots: Slots,
+     epoch: Instant,
+     last_refresh: Option<Instant>,
+@@ -100,6 +101,7 @@ impl Input {
+             bindings: config.bindings(),
+             map: config.motion_map(),
+             platform: Platform::new(config),
++            virtual_pad: None,
+             slots: Slots::default(),
+             epoch: Instant::now(),
+             last_refresh: None,
+@@ -137,7 +139,7 @@ impl Input {
+         }
+         self.last_refresh = Some(Instant::now());
+         self.platform.refresh(&mut self.slots);
+-        let mask = self.slots.mask();
++        let mask = self.slots.mask() | u8::from(self.virtual_pad.is_some());
+         crate::set_controller_connected(mask != 0);
+         if mask != self.announced {
+             let changed = mask ^ self.announced;
+@@ -161,7 +163,7 @@ impl Input {
+         Layout {
+             handheld: self.config.handheld,
+             ids: self.ids,
+-            connected: self.slots.mask(),
++            connected: self.slots.mask() | u8::from(self.virtual_pad.is_some()),
+         }
+     }
+ 
+@@ -183,6 +185,11 @@ impl Input {
+     /// The reading of a player's controllers. A game with one player gets every controller as player 1.
+     fn raw_pad(&self, player: usize, one_player: bool) -> RawPad {
+         let own = self.platform.read_pad(player).unwrap_or_default();
++        let own = if player == 0 {
++            self.virtual_pad.map_or(own, |pad| merge(&[own, pad]))
++        } else {
++            own
++        };
+         if player != 0 || !one_player {
+             return own;
+         }
+@@ -496,6 +503,21 @@ mod tests {
+         Input::new(&Config::default())
+     }
+ 
++    #[test]
++    fn virtual_pad_reports_buttons_axes_and_release() {
++        let mut i = input();
++        i.virtual_pad = Some(RawPad {
++            buttons: 1,
++            axes: [1.0, -1.0, 0.0, 0.0],
++        });
++        let s = i.npad_state(0, crate::npad::style::FULL_KEY);
++        assert_eq!(s.buttons & 1, 1);
++        assert_eq!((s.lx, s.ly), (32767, -32767));
++        i.virtual_pad = Some(RawPad::default());
++        let s = i.npad_state(0, crate::npad::style::FULL_KEY);
++        assert_eq!((s.buttons, s.lx, s.ly), (0, 0, 0));
++    }
++
+     #[test]
+     fn no_controller_gives_player_one_a_state() {
+         let mut i = input();
+diff --git a/crates/nxkit-svc-input/src/sys/mod.rs b/crates/nxkit-svc-input/src/sys/mod.rs
+index 01773f5..54302f1 100644
+--- a/crates/nxkit-svc-input/src/sys/mod.rs
++++ b/crates/nxkit-svc-input/src/sys/mod.rs
+@@ -3,16 +3,16 @@
+ //! `Platform` has the same methods on every OS. Off macOS it has no controller, so the service builds and its
+ //! logic is tested there. Every `unsafe` block of the crate is in `apple`.
+ 
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ #[allow(unsafe_code)]
+ mod apple;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ #[allow(unsafe_code)]
+ mod haptics;
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub(crate) use apple::Platform;
+ 
+-#[cfg(not(target_os = "macos"))]
++#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+ mod stub;
+-#[cfg(not(target_os = "macos"))]
++#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+ pub(crate) use stub::Platform;
+diff --git a/crates/nxkit-svc-system/src/sdk/lifecycle.rs b/crates/nxkit-svc-system/src/sdk/lifecycle.rs
+index 4d5d728..7f66d6a 100644
+--- a/crates/nxkit-svc-system/src/sdk/lifecycle.rs
++++ b/crates/nxkit-svc-system/src/sdk/lifecycle.rs
+@@ -6,33 +6,40 @@
+ use super::log;
+ use crate::seams::seams;
+ use std::sync::atomic::{AtomicBool, Ordering};
++#[cfg(not(target_os = "ios"))]
+ use std::time::Duration;
+ 
+ /// How long the graceful exit may take before the process ends at once.
++#[cfg(not(target_os = "ios"))]
+ const GRACE: Duration = Duration::from_millis(1500);
+ 
+ static QUITTING: AtomicBool = AtomicBool::new(false);
+ 
+ /// Ends the process after the host stopped the audio and the graphics (the `quit` hook of the seams), with the exit
+-/// code 0. A second call returns at once. A watchdog thread ends the process after 1.5 seconds when the hook hangs.
++/// code 0 on desktop. On iOS only the host hook runs: the shell must remain alive. A second call returns at once.
++/// On desktop a watchdog thread ends the process after 1.5 seconds when the hook hangs.
+ pub fn quit(why: &str) {
+     if QUITTING.swap(true, Ordering::SeqCst) {
+         return;
+     }
+     log(&format!("received {why}: graceful exit"));
+-    let watchdog = std::thread::Builder::new()
+-        .name("nxkit-quit".to_owned())
+-        .spawn(|| {
+-            std::thread::sleep(GRACE);
+-            log("graceful exit not done in 1.5 seconds, exiting at once");
+-            std::process::exit(0)
+-        });
+-    if watchdog.is_err() {
+-        log("no watchdog thread for the graceful exit");
++    #[cfg(not(target_os = "ios"))]
++    {
++        let watchdog = std::thread::Builder::new()
++            .name("nxkit-quit".to_owned())
++            .spawn(|| {
++                std::thread::sleep(GRACE);
++                log("graceful exit not done in 1.5 seconds, exiting at once");
++                std::process::exit(0)
++            });
++        if watchdog.is_err() {
++            log("no watchdog thread for the graceful exit");
++        }
+     }
+     if let Some(hook) = seams().quit {
+         hook();
+     }
+     log("graceful exit done");
++    #[cfg(not(target_os = "ios"))]
+     std::process::exit(0)
+ }
+diff --git a/crates/nxkit-svc-system/src/sdk/mod.rs b/crates/nxkit-svc-system/src/sdk/mod.rs
+index 4d061f3..d70b6cb 100644
+--- a/crates/nxkit-svc-system/src/sdk/mod.rs
++++ b/crates/nxkit-svc-system/src/sdk/mod.rs
+@@ -134,11 +134,18 @@ pub(super) extern "C" fn neg1() -> i32 {
+     -1
+ }
+ 
+-/// Prints the message and ends the process. A guest memory fault in an export is a bug of the game that the
+-/// console would stop on too.
++/// Prints the message and stops the game. Desktop exits; iOS requests a host stop and parks the calling thread.
+ pub(super) fn fatal(msg: &str) -> ! {
+     eprintln!("nxkit-svc-system: {msg}");
+-    std::process::exit(1)
++    #[cfg(not(target_os = "ios"))]
++    std::process::exit(1);
++    #[cfg(target_os = "ios")]
++    {
++        lifecycle::quit(msg);
++        loop {
++            std::thread::park();
++        }
++    }
+ }
+ 
+ /// Prints a line of the log of the take-overs.

@@ -1,0 +1,5 @@
+module CGameRuntime {
+    header "GameRuntime.h"
+    link "nxkit_host"
+    export *
+}
