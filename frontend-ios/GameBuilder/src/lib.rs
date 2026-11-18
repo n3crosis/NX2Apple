@@ -1,7 +1,7 @@
 //! Private in-process producer boundary. The shell links the archive, not this checkout.
 use serde::Deserialize;
 use std::{
-    ffi::{CStr, c_char},
+    ffi::{CStr, CString, c_char, c_void},
     path::PathBuf,
 };
 
@@ -27,7 +27,7 @@ struct Request {
     min_os: String,
 }
 
-fn prepare(json: &str) -> Result<(), String> {
+fn prepare(json: &str, report: &dyn Fn(&str) -> bool) -> Result<(), String> {
     let request: Request = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let args = nxb_build::Args {
         nsp_dir: request.input,
@@ -41,7 +41,7 @@ fn prepare(json: &str) -> Result<(), String> {
         auto_analyze: true,
         ..Default::default()
     };
-    nxb_build::prepare_nxb(
+    nxb_build::prepare_nxb_with_progress(
         &args,
         &request.output,
         nxb_build::BuildMetadata {
@@ -50,6 +50,7 @@ fn prepare(json: &str) -> Result<(), String> {
             generation: request.generation,
             min_os: request.min_os,
         },
+        report,
     )
 }
 
@@ -57,12 +58,17 @@ fn prepare(json: &str) -> Result<(), String> {
 /// # Safety
 /// `request_json` is a valid NUL-terminated UTF-8 string for the call duration.
 /// If non-null, `error` points to at least `capacity` writable bytes, disjoint
-/// from the request. No pointers are retained.
+/// from the request. No pointers are retained. The optional callback runs on this
+/// thread and its stage string is valid only during the callback. Context remains
+/// caller-owned and must be valid until this call returns. Return zero from the
+/// callback to cancel before the next stage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nxkit_prepare_nxb(
     request_json: *const c_char,
     error: *mut c_char,
     capacity: usize,
+    progress: Option<extern "C" fn(*const c_char, *mut c_void) -> i32>,
+    context: *mut c_void,
 ) -> i32 {
     let result = std::panic::catch_unwind(|| {
         if request_json.is_null() {
@@ -72,7 +78,14 @@ pub unsafe extern "C" fn nxkit_prepare_nxb(
         let json = unsafe { CStr::from_ptr(request_json) }
             .to_str()
             .map_err(|e| e.to_string())?;
-        prepare(json)
+        prepare(json, &|stage| {
+            if let Some(progress) = progress {
+                let stage = CString::new(stage).expect("static stage name");
+                progress(stage.as_ptr(), context) != 0
+            } else {
+                true
+            }
+        })
     })
     .unwrap_or_else(|_| Err("Game preparation failed unexpectedly".into()));
     let (status, message) = match result {
@@ -100,7 +113,15 @@ mod tests {
     fn rejects_missing_and_invalid_requests_without_unwinding() {
         let mut error = [0_i8; 24];
         assert_eq!(
-            unsafe { nxkit_prepare_nxb(std::ptr::null(), error.as_mut_ptr(), error.len()) },
+            unsafe {
+                nxkit_prepare_nxb(
+                    std::ptr::null(),
+                    error.as_mut_ptr(),
+                    error.len(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            },
             1
         );
         assert_eq!(
@@ -108,7 +129,15 @@ mod tests {
             "Missing build request"
         );
         assert_eq!(
-            unsafe { nxkit_prepare_nxb(c"{}".as_ptr(), error.as_mut_ptr(), error.len()) },
+            unsafe {
+                nxkit_prepare_nxb(
+                    c"{}".as_ptr(),
+                    error.as_mut_ptr(),
+                    error.len(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            },
             1
         );
         assert_eq!(error[23], 0);

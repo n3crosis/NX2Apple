@@ -435,6 +435,10 @@ static NSURL *shell_pick_launch_url(NSSet<UIOpenURLContext *> *contexts) {
     g_library_vc = [ShellLibrary makeControllerWithInitialURL:initialURL];
     self.window.rootViewController = g_library_vc;
     [self.window makeKeyAndVisible];
+    if (o.URLContexts.count) [ShellLibrary openPackage:o.URLContexts.anyObject.URL];
+}
+- (void)scene:(UIScene *)scene openURLContexts:(NSSet<UIOpenURLContext *> *)contexts {
+    if (contexts.count) [ShellLibrary openPackage:contexts.anyObject.URL];
 }
 - (void)scene:(UIScene *)scene openURLContexts:(NSSet<UIOpenURLContext *> *)URLContexts {
     (void)scene;

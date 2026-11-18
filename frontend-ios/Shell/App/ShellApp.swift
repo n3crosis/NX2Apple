@@ -67,6 +67,12 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
     @MainActor private static weak var activeModel: ShellHostModel?
     @MainActor private static var pendingOpenURL: URL?
 
+    @MainActor @objc static func openPackage(_ url: URL) {
+        guard url.isFileURL, url.pathExtension.lowercased() == "nxb", let model = activeModel else { return }
+        // Files/AirDrop enters the same private-copy and review sheet as the picker. Never auto-install.
+        model.enqueueExternalPackage(url)
+    }
+
     @MainActor @objc static func makeController() -> UIViewController {
         makeController(initialURL: nil)
     }
@@ -94,7 +100,13 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
                 dm_shell_request_stop_game()
             }
         )
-        let model = ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker())
+        #if canImport(GameRuntime)
+        let packageLauncher: (any GamePackageLauncher)? = NXKitGameLauncher.shared
+        #else
+        let packageLauncher: (any GamePackageLauncher)? = nil
+        #endif
+        let model = ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker(),
+                                  packageLauncher: packageLauncher)
         activeModel = model
         model.startControllers()
         for entry in model.entries {
@@ -111,7 +123,28 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
             fputs("shell: DM_SHELL_PLAY=\(id) (\(state))\n", stderr)
             DispatchQueue.main.async { model.play(id) }
         }
-        let host = UIHostingController(rootView: ShellHostView(model: model))
+        #if canImport(GameRuntime) && canImport(NxkitBuilder)
+        let buildGame: GamePackageBuild?
+        if NXKitGameLauncher.shared != nil {
+            buildGame = { input, keys, updates, dlc, work, onProgress in
+                guard let revision = info["NXKitRuntimeRevision"] as? String,
+                      let abiValue = info["NXKitRuntimeABI"] as? Int,
+                      let abi = UInt32(exactly: abiValue), abi > 0 else { throw GameLaunchError.notAvailable }
+                let idleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
+                UIApplication.shared.isIdleTimerDisabled = true
+                defer { UIApplication.shared.isIdleTimerDisabled = idleTimerDisabled }
+                let request = NXBBuilder.Request(input: input.path, keys: keys.path, work: work.path,
+                    output: work.appendingPathComponent("game.nxb").path, updates: updates.map(\.path), dlc: dlc.map(\.path),
+                    runtimeABI: abi, runtimeRevision: revision, minOS: "26.0")
+                return try await NXBBuilder.prepare(request, onProgress: onProgress)
+            }
+        } else {
+            buildGame = nil
+        }
+        #else
+        let buildGame: GamePackageBuild? = nil
+        #endif
+        let host = UIHostingController(rootView: ShellHostView(model: model, buildGame: buildGame))
         host.view.backgroundColor = .black
         return host
     }

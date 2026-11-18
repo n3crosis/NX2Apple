@@ -36,6 +36,7 @@ extension LibraryView {
         a.onRestoreSaveBackup = { if !echo() { o.onRestoreSaveBackup($0) } }
         a.onDeleteGame = { if !echo() { o.onDeleteGame($0, $1) } }
         a.onResignGame = { if !echo() { await o.onResignGame($0) } }
+        a.onSignPackage = { if echo() { return nil }; return try await o.onSignPackage($0) }
         a.onOpenHomeButtonSettings = { if !echo() { o.onOpenHomeButtonSettings() } }
         a.onCopyShortcutURL = o.onCopyShortcutURL.map { copy in
             { if !echo() { copy($0) } }
@@ -245,7 +246,7 @@ extension LibraryView {
         gate.handling = true
         defer { gate.handling = false }
         if case .controller = source { gate.controller(action) }
-        guard inputEnabled, !signingIdentityPresented, resigningGameID == nil else { return }
+        guard inputEnabled, !signingIdentityPresented, resigningGameID == nil, !packageShareActive else { return }
         // Every controller button belongs to the button test while it is open: it closes on B held, touch or Escape.
         if buttonTestOpen, case .controller = source { return }
         if device != source { device = source }

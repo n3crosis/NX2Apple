@@ -19,6 +19,7 @@ final class ShellSigningIdentityTests: XCTestCase {
 
     func testMissingIdentityCannotSign() {
         let store = ShellSigningIdentityStore(bundleID: "test.shell." + UUID().uuidString)
+        XCTAssertThrowsError(try store.validateIdentity())
         XCTAssertThrowsError(try store.sign(framework: URL(fileURLWithPath: "/unused"), expectedTeamID: "TESTTEAM01"))
     }
 

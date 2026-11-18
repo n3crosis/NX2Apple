@@ -65,12 +65,13 @@ public struct GameTile: Identifiable, Equatable, Sendable {
     /// The square app icon beside metadata. Without a banner, also shown whole inside the 16:9 card.
     public var icon: Artwork?
     public var state: GameState
+    public var settingsAvailable: Bool
     /// Already localized, such as "Played today". Nil leaves the game out of Recently played.
     public var recentlyPlayed: String?
     /// The engine's manifest says it is a Switch 2 game: the detail view marks it and warns about its memory.
     public var isSwitch2: Bool
     public init(id: String, title: String, subtitle: String = "", banner: Artwork? = nil, icon: Artwork? = nil,
-                state: GameState = .playable, recentlyPlayed: String? = nil, version: String = "", isSwitch2: Bool = false) {
+                state: GameState = .playable, recentlyPlayed: String? = nil, version: String = "", isSwitch2: Bool = false, settingsAvailable: Bool = false) {
         self.isSwitch2 = isSwitch2
         self.id = id
         self.title = title
@@ -79,6 +80,7 @@ public struct GameTile: Identifiable, Equatable, Sendable {
         self.banner = banner
         self.icon = icon
         self.state = state
+        self.settingsAvailable = settingsAvailable
         self.recentlyPlayed = recentlyPlayed
     }
 }
@@ -142,6 +144,7 @@ public struct GameDetail: Identifiable, Equatable, Sendable {
     public var id: String { game.id }
     public var game: GameTile
     public var sections: [SettingSection]
+    public var showsDataSettings: Bool
     public var dataSource: String
     public var dataNote: String
     public var cloudSaves: String?
@@ -157,14 +160,16 @@ public struct GameDetail: Identifiable, Equatable, Sendable {
     public var latestSaveBackup: String?
     /// The host permits re-signing this imported game. Bundled games never expose the action.
     public var canResign: Bool
+    public var shareArchive: URL?
     /// Earlier expiration of the game signing certificate and app provisioning profile, only when both are known.
     public var signingExpiration: Date?
     public init(game: GameTile, sections: [SettingSection] = [], dataSource: String = "", dataNote: String = "",
                 cloudSaves: String? = nil, cloudNote: String = "", dlc: String = "", hasModifiedSettings: Bool = false,
                 dataFromShell: Bool = false, cloudFromShell: Bool = false, cloudCanUseShell: Bool = false,
-                latestSaveBackup: String? = nil, canResign: Bool = false, signingExpiration: Date? = nil) {
+                latestSaveBackup: String? = nil, canResign: Bool = false, signingExpiration: Date? = nil, shareArchive: URL? = nil, showsDataSettings: Bool = true) {
         self.game = game
         self.sections = sections
+        self.showsDataSettings = showsDataSettings
         self.dataSource = dataSource
         self.dataNote = dataNote
         self.cloudSaves = cloudSaves
@@ -176,6 +181,7 @@ public struct GameDetail: Identifiable, Equatable, Sendable {
         self.cloudCanUseShell = cloudCanUseShell
         self.latestSaveBackup = latestSaveBackup
         self.canResign = canResign
+        self.shareArchive = shareArchive
         self.signingExpiration = signingExpiration
     }
 }
@@ -308,6 +314,11 @@ public struct ShellActions {
     public var onDeleteGame: (_ gameID: String, _ saves: Bool) -> Void
     /// Performs signing while Settings shows progress. The host defers result presentation.
     public var onResignGame: (String) async -> Void
+    /// Creates a temporary publisher-signed copy. The view discards it after sharing.
+    public var onSignPackage: (String) async throws -> URL?
+    public var onDiscardSignedPackage: (URL) -> Void
+    /// Keeps launcher input out of the active export, share sheet or error alert.
+    public var onPackageShareActivity: (Bool) -> Void
     /// Presents the prepared signing outcome after Settings has finished closing.
     public var onShowSigningResult: () -> Void
     /// Opens the system Game Controller settings (or fallback app settings) to configure Home Button Override.
@@ -337,6 +348,9 @@ public struct ShellActions {
                 onRestoreSaveBackup: @escaping (String) -> Void = { _ in },
                 onDeleteGame: @escaping (String, Bool) -> Void = { _, _ in },
                 onResignGame: @escaping (String) async -> Void = { _ in },
+                onSignPackage: @escaping (String) async throws -> URL? = { _ in nil },
+                onDiscardSignedPackage: @escaping (URL) -> Void = { _ in },
+                onPackageShareActivity: @escaping (Bool) -> Void = { _ in },
                 onShowSigningResult: @escaping () -> Void = {},
                 onOpenHomeButtonSettings: @escaping () -> Void = {},
                 onCopyShortcutURL: ((String) -> Void)? = nil,
@@ -365,6 +379,9 @@ public struct ShellActions {
         self.onRestoreSaveBackup = onRestoreSaveBackup
         self.onDeleteGame = onDeleteGame
         self.onResignGame = onResignGame
+        self.onSignPackage = onSignPackage
+        self.onDiscardSignedPackage = onDiscardSignedPackage
+        self.onPackageShareActivity = onPackageShareActivity
         self.onShowSigningResult = onShowSigningResult
         self.onOpenHomeButtonSettings = onOpenHomeButtonSettings
         self.onCopyShortcutURL = onCopyShortcutURL

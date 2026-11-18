@@ -115,11 +115,55 @@ public struct ShellSigningIdentityStore: Sendable {
     /// The entire synchronous signing operation owns protected temporary files.
     /// Nothing is materialized in Documents, the import stage, or a shared group.
     public func sign(framework: URL, expectedTeamID: String) throws {
+        try withIdentity { p12, profile, password in
+            try ShellFrameworkResigner.sign(framework: framework, expectedTeamID: expectedTeamID,
+                                            pkcs12: p12, profile: profile, password: password)
+        }
+    }
+
+    /// Sign a private NXB game image without embedding a per-game framework.
+    public func sign(library: URL, expectedTeamID: String) throws {
+        try withIdentity { p12, profile, password in
+            try ShellFrameworkResigner.sign(library: library, expectedTeamID: expectedTeamID,
+                                            pkcs12: p12, profile: profile, password: password)
+        }
+    }
+
+    /// Publisher authenticity is separate from executable signing and profile
+    /// validity. An expired publisher certificate still proves the data signature.
+    public func signPackageManifest(_ manifest: Data) throws -> Data {
+        let credential = try loadCredential()
+        var options: [String: Any] = [kSecImportExportPassphrase as String: credential.password]
+        #if os(macOS)
+        if #available(macOS 15.0, *) {
+            options[kSecImportToMemoryOnly as String] = true
+        } else {
+            throw Failure.invalid
+        }
+        #endif
+        var imported: CFArray?
+        guard SecPKCS12Import(credential.pkcs12 as CFData, options as CFDictionary, &imported) == errSecSuccess,
+              let items = imported as? [[String: Any]],
+              let value = items.first?[kSecImportItemIdentity as String],
+              CFGetTypeID(value as CFTypeRef) == SecIdentityGetTypeID() else { throw Failure.invalid }
+        return try GamePackageSignature.sign(manifest: manifest, identity: value as! SecIdentity)
+    }
+
+    func validateIdentity() throws {
+        _ = try validatedCredential()
+    }
+
+    private func validatedCredential() throws -> Credential {
         let credential = try loadCredential()
         // The Keychain item can survive a shell update signed by a different
         // certificate on the same team. Match the currently installed host again.
         try ShellImportedIdentityValidation.validate(pkcs12: credential.pkcs12, profile: credential.profile,
                                                      password: credential.password, executable: Bundle.main.executableURL)
+        return credential
+    }
+
+    private func withIdentity(_ operation: (URL, URL, String) throws -> Void) throws {
+        let credential = try validatedCredential()
         Self.temporaryLock.lock()
         defer { Self.temporaryLock.unlock() }
         let fm = FileManager.default
@@ -152,7 +196,6 @@ public struct ShellSigningIdentityStore: Sendable {
         try credential.pkcs12.write(to: p12, options: options)
         try credential.profile.write(to: profile, options: options)
         for file in [p12, profile] { try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
-        try ShellFrameworkResigner.sign(framework: framework, expectedTeamID: expectedTeamID,
-                                        pkcs12: p12, profile: profile, password: credential.password)
+        try operation(p12, profile, credential.password)
     }
 }

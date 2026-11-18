@@ -196,7 +196,7 @@ public struct ShellSigningIdentityView: View {
                 }
             } else {
                 clear(); refreshSavedSummary()
-                message = hostText("Signing identity saved. Choose an imported game to re-sign.")
+                message = hostText("Signing identity saved.")
             }
         }
     }

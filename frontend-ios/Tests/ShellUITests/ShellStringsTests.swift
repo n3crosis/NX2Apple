@@ -17,6 +17,7 @@ import Testing
         "Standard": ["de", "sv", "fr", "it"],                         // launch.opt: the game's standard mode, a word in each
         "Controller": ["de", "it"],
         "Handheld": ["de"],
+        "DLC (optional)": ["de"], "Updates (optional)": ["de"],
         "Interface": ["fr"],
         "Layout": ["sv"],
         "Portrait": ["fr"],

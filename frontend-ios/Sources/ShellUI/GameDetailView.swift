@@ -19,6 +19,10 @@ public struct GameDetailView: View {
     @State private var localRestoreBackup = false
     @State private var localHomeScreen = false
     @State private var resigning = false
+    @State private var signingShare = false
+    @State private var signedArchive: URL?
+    @State private var showingSignedShare = false
+    @State private var shareError: String?
     public init(detail: GameDetail, actions: ShellActions = ShellActions(), showsPrimaryAction: Bool = true, showsHeader: Bool = true, nativeSections: Bool = false) {
         self.detail = detail
         self.actions = actions
@@ -37,6 +41,50 @@ public struct GameDetailView: View {
         }
         .foregroundStyle(.white)
         .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: sectionRowIDs)
+        .onChange(of: signingShare || showingSignedShare || shareError != nil) { _, active in
+            actions.onPackageShareActivity(active)
+        }
+        .onDisappear { actions.onPackageShareActivity(false) }
+        .task(id: signingShare) {
+            guard signingShare else { return }
+            defer { signingShare = false }
+            do {
+                guard let archive = try await actions.onSignPackage(detail.id) else { return }
+                if Task.isCancelled { actions.onDiscardSignedPackage(archive); return }
+                signedArchive = archive
+                showingSignedShare = true
+            } catch {
+                if !Task.isCancelled { shareError = error.localizedDescription }
+            }
+        }
+        .sheet(isPresented: $showingSignedShare, onDismiss: {
+            if let signedArchive { actions.onDiscardSignedPackage(signedArchive) }
+            signedArchive = nil
+        }) {
+            NavigationStack {
+                if let signedArchive {
+                    VStack(spacing: 24) {
+                        Text(detail.game.title).font(.headline)
+                        ShareLink(item: signedArchive) {
+                            Label(ShellStrings.text("Share signed game"), systemImage: "square.and.arrow.up")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(ShellPalette.background)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button(ShellStrings.text("Done")) { showingSignedShare = false }
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
+        .alert(ShellStrings.text("Could not sign game"), isPresented: Binding(
+            get: { shareError != nil }, set: { if !$0 { shareError = nil } }
+        )) {
+            Button(ShellStrings.text("Done"), role: .cancel) { shareError = nil }
+        } message: { Text(shareError ?? "") }
         .sheet(isPresented: $localRestoreBackup) {
             if let backup = detail.latestSaveBackup {
                 RestoreSaveBackupView(game: detail.game, backup: backup, restore: {
@@ -80,47 +128,49 @@ public struct GameDetailView: View {
                 }
             }
         }
-        group(ShellStrings.text("Game data")) {
-            SourceRow(symbol: "folder",
-                      title: detail.dataSource.isEmpty ? ShellStrings.text("No data selected") : detail.dataSource,
-                      note: detail.dataNote) {
-                GameSettingsGlassButton(title: ShellStrings.text("Choose…")) { actions.onPickGameData(detail.id) }.accessibilityLabel(ShellStrings.text("Choose game data…"))
-                    .shellTarget("set.data") { actions.onPickGameData(detail.id) }
-                if !detail.dataSource.isEmpty && !detail.dataFromShell {
-                    GameSettingsGlassButton(title: ShellStrings.text("Use app data")) { actions.onUseAppData(detail.id) }.shellTarget("set.appdata") { actions.onUseAppData(detail.id) }
+        if detail.showsDataSettings {
+            group(ShellStrings.text("Game data")) {
+                SourceRow(symbol: "folder",
+                          title: detail.dataSource.isEmpty ? ShellStrings.text("No data selected") : detail.dataSource,
+                          note: detail.dataNote) {
+                    GameSettingsGlassButton(title: ShellStrings.text("Choose…")) { actions.onPickGameData(detail.id) }.accessibilityLabel(ShellStrings.text("Choose game data…"))
+                        .shellTarget("set.data") { actions.onPickGameData(detail.id) }
+                    if !detail.dataSource.isEmpty && !detail.dataFromShell {
+                        GameSettingsGlassButton(title: ShellStrings.text("Use app data")) { actions.onUseAppData(detail.id) }.shellTarget("set.appdata") { actions.onUseAppData(detail.id) }
+                    }
                 }
-            }
-            divider
-            HStack {
-                Image(systemName: "square.stack.3d.up").foregroundStyle(.secondary)
-                Spacer(minLength: 12)
-                Text(detail.dlc.isEmpty ? ShellStrings.text("No additional content") : detail.dlc)
-                    .foregroundStyle(.secondary).multilineTextAlignment(.trailing)
-            }
-            .frame(maxWidth: .infinity, minHeight: 32)
-            .accessibilityElement(children: .combine)
-        }
-        group(ShellStrings.text("Cloud saves")) {
-            SourceRow(symbol: detail.cloudSaves == nil ? "icloud.slash" : "icloud",
-                      title: detail.cloudSaves ?? ShellStrings.text("Off"),
-                      note: detail.cloudNote.isEmpty ? ShellStrings.text("Choose the same iCloud Drive folder you use on your Mac.") : detail.cloudNote) {
-                GameSettingsGlassButton(title: ShellStrings.text("Choose folder…")) { actions.onPickCloudSaves(detail.id) }.shellTarget("set.cloud") { actions.onPickCloudSaves(detail.id) }
-                if detail.cloudCanUseShell {
-                    GameSettingsGlassButton(title: ShellStrings.text("Use Settings folder")) { actions.onUseShellCloud(detail.id) }.shellTarget("set.cloud.shell") { actions.onUseShellCloud(detail.id) }
-                }
-                if detail.cloudSaves != nil {
-                    GameSettingsGlassButton(title: ShellStrings.text("Turn off")) { actions.onDisableCloudSaves(detail.id) }.accessibilityLabel(ShellStrings.text("Turn off cloud saves"))
-                        .shellTarget("set.cloud.off") { actions.onDisableCloudSaves(detail.id) }
-                }
-            }
-            if let backup = detail.latestSaveBackup, !backup.isEmpty {
                 divider
-                GameSettingsGlassButton(title: ShellStrings.text("Restore backup…")) {
-                    requestRestoreBackup(backup)
+                HStack {
+                    Image(systemName: "square.stack.3d.up").foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Text(detail.dlc.isEmpty ? ShellStrings.text("No additional content") : detail.dlc)
+                        .foregroundStyle(.secondary).multilineTextAlignment(.trailing)
                 }
-                .accessibilityIdentifier("cloud.restoreBackup")
-                .shellTarget("set.cloud.restore") {
-                    requestRestoreBackup(backup)
+                .frame(maxWidth: .infinity, minHeight: 32)
+                .accessibilityElement(children: .combine)
+            }
+            group(ShellStrings.text("Cloud saves")) {
+                SourceRow(symbol: detail.cloudSaves == nil ? "icloud.slash" : "icloud",
+                          title: detail.cloudSaves ?? ShellStrings.text("Off"),
+                          note: detail.cloudNote.isEmpty ? ShellStrings.text("Choose the same iCloud Drive folder you use on your Mac.") : detail.cloudNote) {
+                    GameSettingsGlassButton(title: ShellStrings.text("Choose folder…")) { actions.onPickCloudSaves(detail.id) }.shellTarget("set.cloud") { actions.onPickCloudSaves(detail.id) }
+                    if detail.cloudCanUseShell {
+                        GameSettingsGlassButton(title: ShellStrings.text("Use Settings folder")) { actions.onUseShellCloud(detail.id) }.shellTarget("set.cloud.shell") { actions.onUseShellCloud(detail.id) }
+                    }
+                    if detail.cloudSaves != nil {
+                        GameSettingsGlassButton(title: ShellStrings.text("Turn off")) { actions.onDisableCloudSaves(detail.id) }.accessibilityLabel(ShellStrings.text("Turn off cloud saves"))
+                            .shellTarget("set.cloud.off") { actions.onDisableCloudSaves(detail.id) }
+                    }
+                }
+                if let backup = detail.latestSaveBackup, !backup.isEmpty {
+                    divider
+                    GameSettingsGlassButton(title: ShellStrings.text("Restore backup…")) {
+                        requestRestoreBackup(backup)
+                    }
+                    .accessibilityIdentifier("cloud.restoreBackup")
+                    .shellTarget("set.cloud.restore") {
+                        requestRestoreBackup(backup)
+                    }
                 }
             }
         }
@@ -145,23 +195,36 @@ public struct GameDetailView: View {
                 homeScreenButton
             }
         }
-        VStack(alignment: .leading, spacing: 10) {
-            GameSettingsGlassButton(title: ShellStrings.text("Reset to tested defaults")) { actions.onResetDefaults(detail.id) }
-                .accessibilityIdentifier("set.reset")
-                .disabled(!detail.hasModifiedSettings)
-                .shellTarget("set.reset", enabled: detail.hasModifiedSettings) { actions.onResetDefaults(detail.id) }
-            Text(ShellStrings.text("Brings back the settings this game was tested with."))
-                .shellText(12.5).foregroundStyle(.white.opacity(0.45)).fixedSize(horizontal: false, vertical: true)
+        if detail.showsDataSettings || !detail.sections.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                GameSettingsGlassButton(title: ShellStrings.text("Reset to tested defaults")) { actions.onResetDefaults(detail.id) }
+                    .accessibilityIdentifier("set.reset")
+                    .disabled(!detail.hasModifiedSettings)
+                    .shellTarget("set.reset", enabled: detail.hasModifiedSettings) { actions.onResetDefaults(detail.id) }
+                Text(ShellStrings.text("Brings back the settings this game was tested with."))
+                    .shellText(12.5).foregroundStyle(.white.opacity(0.45)).fixedSize(horizontal: false, vertical: true)
+            }
         }
         if detail.canResign {
             VStack(alignment: .leading, spacing: 10) {
                 GameSettingsGlassButton(title: ShellStrings.text("Re-sign game"), loading: resigning, action: resignGame)
-                    .disabled(resigning)
+                    .disabled(resigning || signingShare)
                     .accessibilityIdentifier("set.resign")
-                    .shellTarget("set.resign", enabled: !resigning, action: resignGame)
+                    .shellTarget("set.resign", enabled: !resigning && !signingShare, action: resignGame)
                 Text(ShellStrings.text("Re-signs this game with your saved signing identity."))
                     .shellText(12.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+        }
+        if let archive = detail.shareArchive {
+            ShareLink(item: archive) {
+                Label(ShellStrings.text("Share game"), systemImage: "square.and.arrow.up")
+            }
+            .disabled(resigning || signingShare)
+            .accessibilityIdentifier("set.share")
+            GameSettingsGlassButton(title: ShellStrings.text("Sign and share"), loading: signingShare, action: signAndShare)
+            .disabled(resigning || signingShare)
+            .accessibilityIdentifier("set.share.signed")
+            .shellTarget("set.share.signed", enabled: !resigning && !signingShare, action: signAndShare)
         }
         if let askDelete {
             // Last and apart from the rest: the one action here that removes something. It only asks, the question names what goes.
@@ -175,8 +238,13 @@ public struct GameDetailView: View {
         }
     }
 
+    private func signAndShare() {
+        guard !ignoresPress(), !resigning, !signingShare, !showingSignedShare, shareError == nil else { return }
+        signingShare = true
+    }
+
     private func resignGame() {
-        guard !ignoresPress(), !resigning else { return }
+        guard !ignoresPress(), !resigning, !signingShare, !showingSignedShare, shareError == nil else { return }
         resigning = true
         Task {
             await actions.onResignGame(detail.id)

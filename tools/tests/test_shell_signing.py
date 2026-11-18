@@ -91,7 +91,7 @@ class ShellSigningViewWiringTests(unittest.TestCase):
     def test_shared_signing_busy_state_disables_touch_in_every_host_view(self):
         # Source wiring regression only. Actual sheet/touch behavior needs an iOS Simulator.
         source = (ROOT / 'frontend-ios/Sources/ShellHost/ShellHostView.swift').read_text()
-        self.assertRegex(source, r'\.disabled\(\s*model\.launchingGame\s*\|\|\s*model\.resigningGame\s*\)')
+        self.assertRegex(source, r'\.disabled\(\s*model\.launchingGame\s*\|\|\s*model\.resigningGame\s*\|\|\s*model\.importingPackage\s*\)')
 
 
 if __name__ == '__main__':

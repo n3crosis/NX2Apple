@@ -210,5 +210,42 @@ class ShellBuild(unittest.TestCase):
         self.assertIn('_dm_shell_return_to_library', exported, 'the shell executable must export _dm_shell_return_to_library for front_ios.m dlsym')
 
 
+class NxkitShellPackageTests(unittest.TestCase):
+    def test_generated_project_declares_nxb_document_and_runtime(self):
+        script = (SCRIPT.parent / 'build_nxkit_shell.sh').read_text()
+        generator = script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / 'Gen').mkdir()
+            (out / 'runtime-build.log').write_text('note: native-static-libs: -framework Metal -lc++\n')
+            env = dict(os.environ, NXKIT_RUNTIME_REVISION='a' * 40, NXKIT_RUNTIME_ABI='1',
+                       NXKIT_ARTIFACT_DIR=str(out / 'Rust'), NXKIT_BUILDER_SOURCE=str(out / 'Builder'))
+            subprocess.run([sys.executable, '-I', '-', str(SCRIPT.parent / 'project-shell.yml'), tmp],
+                           input=generator, text=True, env=env, check=True)
+            project = (out / 'project.yml').read_text()
+            self.assertIn('LSItemContentTypes: [org.nxkit.nxb]', project)
+            self.assertIn('UTTypeIdentifier: org.nxkit.nxb', project)
+            self.assertIn('public.filename-extension: [nxb]', project)
+            self.assertIn('NXKitRuntimeRevision: "' + 'a' * 40 + '"', project)
+            self.assertNotIn('# @FRAMEWORKS@', project)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'IPA archive uses macOS ditto')
+    def test_ipa_contains_payload_app_and_preserves_original(self):
+        # Exercise packaging with a fixture app, not an Xcode or engine build.
+        script = (SCRIPT.parent / 'build_nxkit_shell.sh').read_text()
+        packaging = script.split('  APP="$S/dd/Build/Products/Release-iphoneos/DmShell.app"', 1)[1].split('\nelse\n', 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / 'dd/Build/Products/Release-iphoneos/DmShell.app'
+            app.mkdir(parents=True)
+            (app / 'DmShell').write_bytes(b'fixture executable')
+            subprocess.run(['bash', '-euo', 'pipefail', '-c', packaging], check=True,
+                           env=dict(os.environ, S=tmp, APP=str(app)))
+            import zipfile
+            with zipfile.ZipFile(Path(tmp) / 'DmShell.ipa') as archive:
+                self.assertEqual(archive.read('Payload/DmShell.app/DmShell'), b'fixture executable')
+            self.assertTrue((app / 'DmShell').is_file())
+            self.assertEqual(list(Path(tmp).glob('ipa.*')), [])
+
+
 if __name__ == '__main__':
     unittest.main()

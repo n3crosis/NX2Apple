@@ -42,6 +42,7 @@ public struct LibraryView: View {
     public let signingWarning: SigningWarning?
     public let inputEnabled: Bool
     public let signingIdentityContent: AnyView?
+    public let importGameButton: AnyView?
     @Binding public var signingIdentityPresented: Bool
     /// Team that signed the installed app, supplied by the host without reading imported credentials.
     public let signingTeamID: String?
@@ -87,6 +88,7 @@ public struct LibraryView: View {
     @State var divisionAxis: Axis?
     var horizontalDivision: Bool { divisionAxis == .horizontal }
     @State var resigningGameID: String?
+    @State var packageShareActive = false
     @State var pendingMenuAction: (() -> Void)?
     @State var retention = PanelRetention()   // a closed panel stays drawn while the sheet slides out (#664)
     @State var returnFocus: String?
@@ -105,7 +107,7 @@ public struct LibraryView: View {
                 signingWarning: SigningWarning? = nil, onDismissSigningWarning: @escaping () -> Void = {},
                 initialPadMapping: String? = nil, initialButtonTestOpen: Bool = false, signingTeamID: String? = nil, inputEnabled: Bool = true,
                 signingIdentityPresented: Binding<Bool> = .constant(false), signingIdentityContent: AnyView? = nil,
-                canOpenHomeButtonSettings: Bool = false) {
+                canOpenHomeButtonSettings: Bool = false, importGameButton: AnyView? = nil) {
         ShellPalette.configureNativeAppearance()
         self.games = games
         self.controllers = controllers
@@ -115,6 +117,7 @@ public struct LibraryView: View {
         self.signingWarning = signingWarning
         self.inputEnabled = inputEnabled
         self.signingIdentityContent = signingIdentityContent
+        self.importGameButton = importGameButton
         _signingIdentityPresented = signingIdentityPresented
         self.signingTeamID = signingTeamID
         self.canOpenHomeButtonSettings = canOpenHomeButtonSettings
@@ -201,9 +204,9 @@ public struct LibraryView: View {
                     .presentationDragIndicator(.visible)
                     .presentationBackground(ShellPalette.background)
                     .presentationContentInteraction(touchLayout != nil ? .scrolls : .automatic)
-                    .interactiveDismissDisabled(touchLayout != nil || resigningGameID != nil)
+                    .interactiveDismissDisabled(touchLayout != nil || resigningGameID != nil || packageShareActive)
                     .modifier(MenuPlacement(divided: divisionAxis == .vertical, secondary: controllersOpen || shellSettingsOpen))
-                    .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil && touchLayout == nil && padMapping?.row == nil) { handle($0, from: .keyboard) })
+                    .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil && !packageShareActive && touchLayout == nil && padMapping?.row == nil) { handle($0, from: .keyboard) })
             }
 
             .environment(\.shellOpenTouchLayout, { openTouchLayout(whole, insets) })
@@ -269,7 +272,7 @@ public struct LibraryView: View {
             }
         }
         .onAnyTouch { gate.touch() }
-        .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil && !menuPresented) { handle($0, from: .keyboard) })
+        .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil && !packageShareActive && !menuPresented) { handle($0, from: .keyboard) })
         .onAppear { focusRefresh &+= 1 }
         .onDisappear { targets.values.removeAll(); targets.libraryValues.removeAll() }
         .onChange(of: settingsOpen) { _, open in
@@ -308,6 +311,7 @@ public struct LibraryView: View {
             actions.onImportSigningIdentity()
         }
         routed.onRestoreSaveBackup = { id in handOffMenu { actions.onRestoreSaveBackup(id) } }
+        routed.onPackageShareActivity = { packageShareActive = $0 }
         routed.onResignGame = { id in
             guard pendingMenuAction == nil, resigningGameID == nil,
                   games.contains(where: { $0.id == id && $0.canResign }) else { return }
@@ -351,7 +355,7 @@ public struct LibraryView: View {
 
     var menuSheet: some View {
         NavigationStack {
-            menuContent.toolbar { if touchLayout == nil && !signingIdentityPresented && resigningGameID == nil { launcherToolbar } }
+            menuContent.toolbar { if touchLayout == nil && !signingIdentityPresented && resigningGameID == nil && !packageShareActive { launcherToolbar } }
                 .accessibilityHidden(touchLayout != nil)
                 .navigationDestination(isPresented: $signingIdentityPresented) {
                     if let signingIdentityContent { signingIdentityContent }
@@ -407,7 +411,7 @@ public struct LibraryView: View {
             .tint(ShellPalette.cream)
             .preferredColorScheme(.dark)
             .interactiveDismissDisabled()
-            .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil) { handle($0, from: .keyboard) })
+            .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil && !packageShareActive) { handle($0, from: .keyboard) })
     }
 
     var menuContent: some View {
@@ -622,6 +626,11 @@ public struct LibraryView: View {
             .sharedBackgroundVisibility(.hidden)
         }
 
+        if let importGameButton {
+            ToolbarItem(placement: .primaryAction) {
+                importGameButton.disabled(menuPresented).accessibilityHidden(menuPresented)
+            }
+        }
         if let item = libraryActions.first(where: { $0.id == "controllers.open" }) {
             controllerItem(item)
             ToolbarSpacer(.fixed, placement: .primaryAction)

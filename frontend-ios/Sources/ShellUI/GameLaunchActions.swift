@@ -53,7 +53,7 @@ struct GameLaunchActions: View {
             .accessibilityLabel(game.state.actionTitle + ", " + game.title)
             .accessibilityIdentifier("state.action")
             .shellTarget(focusPrefix + "play", enabled: !joining, radius: ShellFocusTarget.capsule, action: primary)
-            if (game.state == .playable || joining), let settings {
+            if (game.state == .playable || joining || game.settingsAvailable), let settings {
                 Button(action: settings) {
                     Label(ShellStrings.text("Game settings"), systemImage: "slider.horizontal.3")
                         .labelStyle(.iconOnly)

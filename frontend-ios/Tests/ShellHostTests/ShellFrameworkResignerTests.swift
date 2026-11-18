@@ -3,6 +3,16 @@ import Testing
 @testable import ShellHost
 
 @Suite struct ShellFrameworkResignerTests {
+    @Test func signingDiagnosticsPreserveStageAndErrnoWithoutNativeOutput() {
+        for stage in ["signature registration", "library validation"] {
+            let error: Error = ShellSigningError.kernel(stage, 1)
+            #expect(error.localizedDescription.contains("\(stage): errno 1"))
+        }
+        let error: Error = ShellSigningError.signature("/private/signing/identity.p12")
+        #expect(!error.localizedDescription.contains("/private/"))
+        #expect(error.localizedDescription.contains("Settings"))
+    }
+
     private func header(magic: UInt32 = 0xfeedfacf, cpu: UInt32 = 0x0100000c,
                         kind: UInt32 = 6) -> Data {
         var bytes = Data()

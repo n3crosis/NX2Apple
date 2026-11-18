@@ -137,6 +137,16 @@ private struct CertificateFileVersion: Equatable {
     public static let didReturnToLibraryNotification = Notification.Name("DMShellDidReturnToLibrary")
     public private(set) var details: [GameDetail] = []
     public private(set) var entries: [CatalogueEntry] = []
+    public private(set) var packages: [GamePackageLibrary.Entry] = []
+    public var packagePreview: GamePackageLibrary.Prepared?
+    public private(set) var importingPackage = false
+    @ObservationIgnored private var externalPackages: [(url: URL, scoped: Bool)] = []
+    public private(set) var hasExternalPackage = false
+    var canPreparePackage: Bool {
+        !importingPackage && packagePreview == nil && !isGameRunning && !launchingGame && !resigningGame &&
+            !importingSigningIdentity && cloudConflict == nil && log == nil && notice == nil
+    }
+    @ObservationIgnored private let packageLauncher: (any GamePackageLauncher)?
     public private(set) var controllers: [ControllerInfo] = []
     public private(set) var input = ShellInputLog()
     /// A short message the host view shows as an alert.
@@ -150,10 +160,10 @@ private struct CertificateFileVersion: Equatable {
     public private(set) var isDeepLinkLaunching = false
     @ObservationIgnored private let signingSession = GameSigningSession.shared
     public var resigningGame: Bool { signingSession.resigning }
-    var isGameRunning: Bool { launcher.isGameRunning }
+    var isGameRunning: Bool { launcher.isGameRunning || packageLauncher?.isGameRunning == true }
 
     public var canResignGames: Bool {
-        !signingSession.hasPendingLaunch && !resigningGame && cloudConflict == nil
+        !signingSession.hasPendingLaunch && !resigningGame && !importingPackage && cloudConflict == nil
     }
 
     public var resignableGames: [CatalogueEntry] {
@@ -173,6 +183,10 @@ private struct CertificateFileVersion: Equatable {
     }
 
     public func resignGame(_ id: String) async {
+        if id.hasPrefix("nxb:") {
+            await resignPackage(String(id.dropFirst(4)))
+            return
+        }
         guard canResignGames,
               let entry = resignableGames.first(where: { $0.id == id }),
               let framework = entry.frameworkURL, let root = config.hotFrameworksRoot,
@@ -314,9 +328,10 @@ private struct CertificateFileVersion: Equatable {
     @ObservationIgnored nonisolated(unsafe) private var returnObserver: (any NSObjectProtocol)?
 
     public init(config: ShellHostConfig, launcher: any GameLauncher = StubGameLauncher(), picker: any FolderPicker = NoFolderPicker(),
-                shellSettings: ShellSettingsStore = .current) {
+                shellSettings: ShellSettingsStore = .current, packageLauncher: (any GamePackageLauncher)? = nil) {
         self.config = config
         self.launcher = launcher
+        self.packageLauncher = packageLauncher
         self.picker = picker
         self.shellSettings = shellSettings
         shellData = BookmarkStore(defaults: shellSettings.defaults, key: ShellSettingsStore.dataFolderKey)
@@ -383,6 +398,7 @@ private struct CertificateFileVersion: Equatable {
     }
 
     deinit {
+        for item in externalPackages where item.scoped { item.url.stopAccessingSecurityScopedResource() }
         defaultsObserver.map(NotificationCenter.default.removeObserver)
         foregroundObserver.map(NotificationCenter.default.removeObserver)
         returnObserver.map(NotificationCenter.default.removeObserver)
@@ -538,6 +554,8 @@ private struct CertificateFileVersion: Equatable {
     private func reload(afterClaim: Bool) {
         guard !resigningGame else { return }
         // Imports and completed re-signs reload the catalogue, including replacements at the same path.
+        try? packageLibrary.prune(preserving: GamePackageSession.loadedDirectories)
+        packages = packageLibrary.entries()
         certificateExpirations.removeAll(keepingCapacity: true)
         forgetCheckedRomfsImages()
         resolvedProfiles.removeAll()
@@ -919,6 +937,8 @@ private struct CertificateFileVersion: Equatable {
             onRestoreSaveBackup: { [weak self] id in self?.restoreLatestSaveBackup(id) },
             onDeleteGame: { [weak self] id, saves in self?.deleteGame(id, saves: saves) },
             onResignGame: { [weak self] id in await self?.resignGame(id) },
+            onSignPackage: { [weak self] id in try await self?.signPackageForSharing(id) },
+            onDiscardSignedPackage: { url in try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) },
             onShowSigningResult: { [weak self] in self?.showSigningResult() },
             onOpenHomeButtonSettings: { [weak self] in self?.openHomeButtonSettings() },
             onCopyShortcutURL: { [weak self] id in self?.copyShortcutURL(for: id) },
@@ -1077,6 +1097,10 @@ private struct CertificateFileVersion: Equatable {
     /// and cloud saves (those folders are the player's and are not touched) and when it was played, and takes the game off the
     /// list. The game's framework inside the app stays: see `GameDeletion`.
     public func deleteGame(_ id: String, saves: Bool) {
+        if id.hasPrefix("nxb:") {
+            deletePackage(String(id.dropFirst(4)), saves: saves)
+            return
+        }
         guard !resigningGame else { return }
         guard let entry = entry(id) else { return }
         joinGeneration &+= 1
@@ -1347,6 +1371,10 @@ private struct CertificateFileVersion: Equatable {
 
     public func play(_ id: String) {
         clearDeepLinkStateForManualPlay()
+        if id.hasPrefix("nxb:") {
+            Task { await playPackage(String(id.dropFirst(4))) }
+            return
+        }
         Task { await playNow(id) }
     }
 
@@ -1356,7 +1384,7 @@ private struct CertificateFileVersion: Equatable {
     }
 
     private func playInternal(_ id: String, suppressErrorNotice: Bool) async -> LaunchOutcome {
-        guard !launchingGame, !resigningGame, cloudConflict == nil,
+        guard !launchingGame, !resigningGame, !importingPackage, cloudConflict == nil,
               let entry = entry(id), let manifest = entry.manifest, let framework = entry.frameworkURL,
               details.first(where: { $0.id == id })?.game.state == .playable else {
             return .failed(nil)
@@ -1699,4 +1727,202 @@ private struct CertificateFileVersion: Equatable {
     static func info(for c: ConnectedController) -> ControllerInfo {
         ControllerInfo(id: c.id, name: c.name, player: hostText("Player \(c.player)"), batteryPercent: c.batteryPercent, charging: c.charging)
     }
+}
+
+
+extension ShellHostModel {
+    private var packageLibrary: GamePackageLibrary {
+        GamePackageLibrary(root: config.appDataRoot.deletingLastPathComponent().appendingPathComponent("NXB", isDirectory: true))
+    }
+
+    public var libraryDetails: [GameDetail] {
+        details + packages.map { entry in
+            let state: GameState
+            do {
+                guard let packageLauncher else { throw GameLaunchError.notAvailable }
+                try packageLauncher.checkCompatibility(entry.manifest)
+                state = .playable
+            } catch {
+                state = .broken(reason: hostText("Launching is not available yet."), technical: error.localizedDescription)
+            }
+            return GameDetail(game: GameTile(id: "nxb:" + entry.id, title: entry.manifest.name,
+                icon: image(entry.runRoot.appendingPathComponent("icon.jpg")), state: state, settingsAvailable: true),
+                canResign: true, signingExpiration: packageExpiration(entry), shareArchive: entry.archive, showsDataSettings: false)
+        }
+    }
+
+    public func enqueueExternalPackage(_ url: URL) {
+        guard url.isFileURL, url.pathExtension.lowercased() == "nxb" else { return }
+        externalPackages.append((url, url.startAccessingSecurityScopedResource()))
+        hasExternalPackage = true
+    }
+
+    func prepareNextExternalPackage() async {
+        guard canPreparePackage, !externalPackages.isEmpty else { return }
+        let next = externalPackages.removeFirst()
+        hasExternalPackage = !externalPackages.isEmpty
+        defer { if next.scoped { next.url.stopAccessingSecurityScopedResource() } }
+        await preparePackage(next.url)
+    }
+
+    @discardableResult public func preparePackage(_ url: URL) async -> Bool {
+        guard canPreparePackage else { return false }
+        importingPackage = true
+        defer { importingPackage = false }
+        let library = packageLibrary
+        do {
+            packagePreview = try await Task.detached(priority: .userInitiated) {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                return try library.prepare(url)
+            }.value
+            return true
+        } catch { notice = error.localizedDescription; return false }
+    }
+
+    public func cancelPackageImport() {
+        guard !importingPackage else { return }
+        if let packagePreview { packageLibrary.discard(packagePreview) }
+        packagePreview = nil
+    }
+
+    /// Locally built packages use the same verification and signing path without
+    /// an import confirmation. The build job owns its archive until this succeeds.
+    func installBuiltPackage(_ url: URL) async throws {
+        guard canPreparePackage else { throw GamePackageError.invalid("library is busy") }
+        importingPackage = true
+        defer { importingPackage = false }
+        let library = packageLibrary
+        let prepared = try await Task.detached(priority: .userInitiated) {
+            try library.prepare(url)
+        }.value
+        defer { library.discard(prepared) }
+        try await installPackage(prepared)
+        reload()
+    }
+
+    public func importPackage() async {
+        guard let prepared = packagePreview, !importingPackage, !isGameRunning, !launchingGame, !resigningGame else { return }
+        importingPackage = true
+        defer { importingPackage = false }
+        do {
+            try await installPackage(prepared)
+            packagePreview = nil
+            reload()
+        } catch { notice = error.localizedDescription }
+    }
+
+    private func installPackage(_ prepared: GamePackageLibrary.Prepared) async throws {
+        guard let team = signingTeamID, ShellSigningIdentityStore().hasIdentity else {
+            throw GamePackageError.invalid(hostText("Check your signing identity in Settings and unlock this device, then try again. The installed game was not changed."))
+        }
+        guard let packageLauncher else { throw GameLaunchError.notAvailable }
+        try packageLauncher.checkCompatibility(prepared.preview.manifest)
+        let library = packageLibrary
+        _ = try await Task.detached(priority: .userInitiated) {
+            try library.install(prepared, checkCompatibility: { _ in }) { executable in
+                try ShellSigningIdentityStore().sign(library: executable, expectedTeamID: team)
+            }
+        }.value
+    }
+
+    private func playPackage(_ id: String) async {
+        guard let packageLauncher, let game = packages.first(where: { $0.id == id }),
+              !launchingGame, !resigningGame, !importingPackage, !isGameRunning else { return }
+        launchingGame = true
+        defer { launchingGame = false }
+        do {
+            try packageLauncher.checkCompatibility(game.manifest)
+            let dataRoot = packageDataRoot(game.id)
+            try FileManager.default.createDirectory(at: dataRoot, withIntermediateDirectories: true)
+            // An attempted dlopen may retain the image even if launch later fails.
+            GamePackageSession.loadedDirectories.insert(game.directory)
+            try await packageLauncher.launch(game, dataRoot: dataRoot)
+        } catch { notice = error.localizedDescription }
+    }
+
+    private func packageDataRoot(_ id: String) -> URL {
+        config.appDataRoot.deletingLastPathComponent().appendingPathComponent("NXBData", isDirectory: true)
+            .appendingPathComponent(id, isDirectory: true)
+    }
+
+    private func packageExpiration(_ entry: GamePackageLibrary.Entry) -> Date? {
+        guard let profile = signingProfileExpiration,
+              let certificate = certificateExpiration(at: entry.runRoot.appendingPathComponent("nxgame.dylib")) else { return nil }
+        return min(profile, certificate)
+    }
+
+    private func signPackageForSharing(_ id: String) async throws -> URL? {
+        guard id.hasPrefix("nxb:"), let entry = packages.first(where: { "nxb:" + $0.id == id }) else { return nil }
+        let export = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let output = directory.appendingPathComponent(entry.id + ".nxb")
+            do {
+                try GamePackage.exportSigned(entry.archive, to: output) {
+                    try ShellSigningIdentityStore().signPackageManifest($0)
+                }
+                try Task.checkCancellation()
+                return output
+            } catch {
+                try? FileManager.default.removeItem(at: directory)
+                if error is ShellSigningIdentityStore.Failure {
+                    throw GamePackageError.invalid(hostText("Check your signing identity in Settings and unlock this device, then try again. The installed game was not changed."))
+                }
+                throw error
+            }
+        }
+        return try await withTaskCancellationHandler {
+            try await export.value
+        } onCancel: {
+            export.cancel()
+        }
+    }
+
+    private func resignPackage(_ id: String) async {
+        guard canResignGames, !isGameRunning, !launchingGame,
+              let entry = packages.first(where: { $0.id == id }) else { return }
+        guard let team = signingTeamID, ShellSigningIdentityStore().hasIdentity else {
+            pendingSigningResult = { [weak self] in self?.importingSigningIdentity = true }
+            return
+        }
+        signingSession.resigning = true
+        defer { signingSession.resigning = false; signingSession.reload() }
+        do {
+            guard let packageLauncher else { throw GameLaunchError.notAvailable }
+            try packageLauncher.checkCompatibility(entry.manifest)
+            let library = packageLibrary
+            let installed = try await Task.detached(priority: .userInitiated) {
+                let prepared = try library.prepare(entry.archive)
+                defer { library.discard(prepared) }
+                return try library.install(prepared, checkCompatibility: { _ in }) { executable in
+                    try ShellSigningIdentityStore().sign(library: executable, expectedTeamID: team)
+                }
+            }.value
+            let message: String
+            if let expiry = packageExpiration(installed) {
+                let date = expiry.formatted(date: .abbreviated, time: .omitted)
+                message = hostText("\(entry.manifest.name) is signed until \(date).")
+            } else {
+                message = hostText("\(entry.manifest.name) has been re-signed. The expiry date is unavailable.")
+            }
+            pendingSigningResult = { [weak self] in self?.notice = message; self?.noticeTitle = hostText("Game re-signed") }
+        } catch {
+            let message = error.localizedDescription
+            pendingSigningResult = { [weak self] in self?.notice = message }
+        }
+    }
+
+    private func deletePackage(_ id: String, saves: Bool) {
+        guard !isGameRunning, !launchingGame, !resigningGame, !importingPackage,
+              let entry = packages.first(where: { $0.id == id }) else { return }
+        do {
+            try packageLibrary.remove(entry, preserving: GamePackageSession.loadedDirectories)
+            let failed = GameDeletion.delete(in: packageDataRoot(id), saves: saves)
+            if !failed.isEmpty { throw GamePackageError.invalid("could not remove game data") }
+        } catch { notice = error.localizedDescription }
+        reload()
+    }
+
 }

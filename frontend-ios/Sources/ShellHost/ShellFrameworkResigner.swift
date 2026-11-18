@@ -2,7 +2,21 @@ import Foundation
 import Darwin
 import ZsignC
 
-enum ShellSigningError: Error { case signature(String), invalid(String), kernel(String, Int32) }
+enum ShellSigningError: LocalizedError {
+    case signature(String), invalid(String), kernel(String, Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .signature:
+            // Native signer output can include private paths. Do not expose it here.
+            return "Signing failed. Check the signing identity and provisioning profile in Settings."
+        case .invalid(let reason):
+            return "Game signing validation failed: \(reason)"
+        case .kernel(let stage, let code):
+            return "The operating system rejected the signed game library during \(stage): errno \(code) (\(String(cString: strerror(code))))."
+        }
+    }
+}
 
 /// Re-signs private staged copies only. Never operate on an installed or loaded image.
 enum ShellFrameworkResigner {
@@ -40,6 +54,31 @@ enum ShellFrameworkResigner {
             throw ShellSigningError.signature("signed image team mismatch")
         }
         try validate(file, signature: signature)
+    }
+
+    /// NXB carries a bare translated image; the shared runtime stays in the app.
+    static func sign(library: URL, expectedTeamID: String,
+                     pkcs12: URL, profile: URL, password: String) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: library.path)
+        guard library.isFileURL, attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.referenceCount] as? NSNumber)?.intValue == 1,
+              try isLibrary(library) else { throw ShellSigningError.invalid("staged game library") }
+        guard !expectedTeamID.isEmpty, !expectedTeamID.contains("\0"),
+              let identifier = Bundle.main.bundleIdentifier, !identifier.isEmpty,
+              identifier.utf8.count <= 255, !identifier.contains("\0"),
+              pkcs12.isFileURL, profile.isFileURL, !password.contains("\0") else {
+            throw ShellSigningError.signature("invalid host signing identity")
+        }
+        var message = [CChar](repeating: 0, count: 1024)
+        let result = zsign_sign_library(library.path, pkcs12.path, password,
+            profile.path, expectedTeamID, identifier, &message, message.count)
+        guard result == 0 else {
+            throw ShellSigningError.signature(String(decoding: message.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        }
+        guard let signature = FrameworkSignature.inspect(executable: library), signature.teamID == expectedTeamID else {
+            throw ShellSigningError.signature("signed image team mismatch")
+        }
+        try validate(library, signature: signature)
     }
 
     /// Personal Team profiles require the host app's identifier in the CodeDirectory.
