@@ -3,9 +3,21 @@ import Foundation
 public struct GameBuildProgress: Sendable {
     public let stage: String
     public let message: String
-    public init(stage: String, message: String) {
+    /// Only input preparation currently reports a measured denominator. Native
+    /// compiler stages remain indeterminate rather than estimating percentages.
+    public let completedFiles: Int?
+    public let totalFiles: Int?
+    public init(stage: String, message: String, completedFiles: Int? = nil, totalFiles: Int? = nil) {
         self.stage = stage
         self.message = message
+        if stage == "inputs", let completedFiles, let totalFiles,
+           totalFiles > 0, (0...totalFiles).contains(completedFiles) {
+            self.completedFiles = completedFiles
+            self.totalFiles = totalFiles
+        } else {
+            self.completedFiles = nil
+            self.totalFiles = nil
+        }
     }
 }
 
@@ -46,6 +58,22 @@ struct GameBuildJob: Codable, Sendable {
     let dlc: [Source]
     var stage = "inputs"
     var logs: [String] = []
+    var completedFiles: Int?
+    var totalFiles: Int?
+
+    /// Record only trusted stage labels and numeric counts, never the native
+    /// message (which may contain source paths or credentials).
+    mutating func record(_ event: GameBuildProgress, label: String, at date: Date = Date()) {
+        let changed = stage != event.stage || completedFiles != event.completedFiles || totalFiles != event.totalFiles
+        stage = event.stage
+        completedFiles = event.completedFiles
+        totalFiles = event.totalFiles
+        guard changed || logs.isEmpty else { return }
+        let timestamp = date.formatted(date: .omitted, time: .standard)
+        let count = completedFiles.flatMap { done in totalFiles.map { " (\(done)/\($0))" } } ?? ""
+        logs.append("[\(timestamp)] \(label)\(count)")
+        if logs.count > 100 { logs.removeFirst(logs.count - 100) }
+    }
 
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

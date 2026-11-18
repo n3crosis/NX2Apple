@@ -168,4 +168,3 @@ struct GamePackageSharePage: View {
         return CIContext().createCGImage(output, from: output.extent)
     }
 }
-

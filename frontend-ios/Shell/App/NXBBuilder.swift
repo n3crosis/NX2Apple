@@ -72,22 +72,34 @@ struct NXBBuilder {
                 if FileManager.default.fileExists(atPath: output.path) { try FileManager.default.removeItem(at: output) }
                 if FileManager.default.fileExists(atPath: completed.path) { try FileManager.default.removeItem(at: completed) }
                 try callback.checkCancellation()
-                onProgress(GameBuildProgress(stage: "inputs", message: ""))
+                let totalFiles = 1 + request.updates.count + request.dlc.count
+                var completedFiles = 0
+                func reportInputs() {
+                    onProgress(GameBuildProgress(stage: "inputs", message: "",
+                                                 completedFiles: completedFiles, totalFiles: totalFiles))
+                }
+                reportInputs()
                 let inputs = URL(fileURLWithPath: request.work).appendingPathComponent("inputs", isDirectory: true)
                 // Rust reads package ranges repeatedly. Snapshot coordinated provider files
                 // so downloads and external edits cannot change them between passes.
                 func materialize(_ path: String, _ slot: String) throws -> String {
                     try callback.checkCancellation()
-                    onProgress(GameBuildProgress(stage: "inputs", message: ""))
+                    reportInputs()
                     let source = URL(fileURLWithPath: path)
                     let directory = inputs.appendingPathComponent(slot, isDirectory: true)
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                     let destination = directory.appendingPathComponent(source.lastPathComponent)
-                    if FileManager.default.fileExists(atPath: destination.path) { return destination.path }
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        completedFiles += 1
+                        reportInputs()
+                        return destination.path
+                    }
                     let partial = directory.appendingPathComponent(".copying")
                     if FileManager.default.fileExists(atPath: partial.path) { try FileManager.default.removeItem(at: partial) }
                     try coordinatedRead(source) { try FileManager.default.copyItem(at: $0, to: partial) }
                     try FileManager.default.moveItem(at: partial, to: destination)
+                    completedFiles += 1
+                    reportInputs()
                     return destination.path
                 }
                 request.input = try materialize(request.input, "base")

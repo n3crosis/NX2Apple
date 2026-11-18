@@ -2556,5 +2556,8 @@
   "ios.host.sharing.stop": "Sluta dela",
   "ios.host.sharing.unavailable": "Spelpaketet är inte tillgängligt",
   "ios.host.Export NXB": "Exportera NXB",
-  "ios.host.External sharing": "Extern delning"
+  "ios.host.External sharing": "Extern delning",
+  "ios.host.Time in current step": "Tid i aktuellt steg",
+  "ios.host.Files prepared": "Förberedda filer",
+  "ios.host.Waiting for this step to finish. Detailed progress is not available.": "Väntar på att detta steg ska slutföras. Detaljerat förlopp är inte tillgängligt."
 }

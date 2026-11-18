@@ -2556,5 +2556,8 @@
   "ios.host.sharing.stop": "停止共享",
   "ios.host.sharing.unavailable": "游戏包不可用",
   "ios.host.Export NXB": "导出 NXB",
-  "ios.host.External sharing": "外部共享"
+  "ios.host.External sharing": "外部共享",
+  "ios.host.Time in current step": "当前步骤用时",
+  "ios.host.Files prepared": "已准备文件",
+  "ios.host.Waiting for this step to finish. Detailed progress is not available.": "等待此步骤完成。无法提供详细进度。"
 }

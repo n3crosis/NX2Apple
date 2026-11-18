@@ -2,6 +2,46 @@ import XCTest
 @testable import ShellHost
 
 final class GameBuildJobTests: XCTestCase {
+    func testMeasuredProgressRejectsInventedOrInvalidDenominators() {
+        let valid = GameBuildProgress(stage: "inputs", message: "", completedFiles: 2, totalFiles: 3)
+        XCTAssertEqual(valid.completedFiles, 2)
+        XCTAssertEqual(valid.totalFiles, 3)
+        for event in [
+            GameBuildProgress(stage: "shaders", message: "", completedFiles: 1, totalFiles: 10),
+            GameBuildProgress(stage: "inputs", message: "", completedFiles: -1, totalFiles: 3),
+            GameBuildProgress(stage: "inputs", message: "", completedFiles: 4, totalFiles: 3),
+            GameBuildProgress(stage: "inputs", message: "", completedFiles: 0, totalFiles: 0)
+        ] {
+            XCTAssertNil(event.completedFiles)
+            XCTAssertNil(event.totalFiles)
+        }
+    }
+
+    func testProgressLogRecordsStageAndCountsWithoutNativePathsOrCredentials() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let input = root.appendingPathComponent("fixture.nsp")
+        try Data([1]).write(to: input)
+        var job = try GameBuildJob(input: .init(input), updates: [], dlc: [])
+        let event = GameBuildProgress(stage: "inputs", message: "/private/secret/prod.keys password=secret",
+                                      completedFiles: 1, totalFiles: 2)
+        job.record(event, label: "Copying game files")
+        job.record(event, label: "Copying game files")
+        XCTAssertEqual(job.logs.count, 1)
+        XCTAssertTrue(job.logs[0].contains("Copying game files (1/2)"))
+        XCTAssertFalse(job.logs[0].contains("secret"))
+        job.record(GameBuildProgress(stage: "shaders", message: "private path"), label: "Compiling shaders")
+        XCTAssertNil(job.completedFiles)
+        XCTAssertNil(job.totalFiles)
+        XCTAssertEqual(job.logs.count, 2)
+        XCTAssertFalse(job.logs.joined().contains("private path"))
+        try job.save(in: root.appendingPathComponent("job"))
+        let restored = try GameBuildJob.load(in: root.appendingPathComponent("job"))
+        XCTAssertEqual(restored.logs, job.logs)
+        XCTAssertEqual(restored.stage, "shaders")
+    }
+
     func testStaleWindowCannotResumeOrDiscardReplacementJob() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

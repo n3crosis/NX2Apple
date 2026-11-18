@@ -2556,5 +2556,8 @@
   "ios.host.sharing.stop": "Arrêter le partage",
   "ios.host.sharing.unavailable": "Paquet du jeu indisponible",
   "ios.host.Export NXB": "Exporter NXB",
-  "ios.host.External sharing": "Partage externe"
+  "ios.host.External sharing": "Partage externe",
+  "ios.host.Time in current step": "Temps de l’étape en cours",
+  "ios.host.Files prepared": "Fichiers préparés",
+  "ios.host.Waiting for this step to finish. Detailed progress is not available.": "Cette étape est en cours. La progression détaillée n’est pas disponible."
 }

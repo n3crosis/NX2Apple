@@ -25,6 +25,7 @@ struct GamePackageBuildView: View {
     @State private var discarding = false
     @State private var installing = false
     @State private var progressRun: UUID?
+    @State private var stageStartedAt: Date?
     @State private var failure: String?
     @State private var job: GameBuildJob?
     @State private var hasSavedJob = false
@@ -103,6 +104,25 @@ struct GamePackageBuildView: View {
                     Section {
                         if let job {
                             Text(stageLabel(job.stage))
+                                .accessibilityIdentifier("builder.stage")
+                            if building, let stageStartedAt {
+                                HStack {
+                                    Text(hostText("Time in current step"))
+                                    Spacer()
+                                    Text(stageStartedAt, style: .timer).monospacedDigit()
+                                }.font(.footnote)
+                            }
+                            if let done = job.completedFiles, let total = job.totalFiles {
+                                ProgressView(value: Double(done), total: Double(total))
+                                LabeledContent(hostText("Files prepared"), value: "\(done) / \(total)")
+                                    .accessibilityIdentifier("builder.fileProgress")
+                            } else if building {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ProgressView().progressViewStyle(.linear)
+                                    Text(hostText("Waiting for this step to finish. Detailed progress is not available."))
+                                        .font(.footnote).foregroundStyle(.secondary)
+                                }
+                            }
                             ScrollView {
                                 Text(verbatim: job.logs.joined(separator: "\n"))
                                     .font(.footnote.monospaced()).textSelection(.enabled)
@@ -296,6 +316,7 @@ struct GamePackageBuildView: View {
             buildTask = nil
             discarding = false
             installing = false
+            stageStartedAt = nil
         }
         guard currentJobUnchanged() else { return }
         var scoped: [URL] = []
@@ -336,15 +357,13 @@ struct GamePackageBuildView: View {
             let dlcURLs = try saved.dlc.enumerated().map { try access($0.element.resolve(in: work, slot: "dlc/\($0.offset)")) }
             let run = UUID()
             progressRun = run
+            stageStartedAt = Date()
             defer { progressRun = nil }
             let output = try await build(source, keys, updateURLs, dlcURLs, work) { event in
                 Task { @MainActor in
                     guard progressRun == run else { return }
-                    job?.stage = event.stage
-                    // Native callbacks carry static stage messages, never credentials or raw tool output.
-                    let message = stageLabel(event.stage)
-                    if job?.logs.last != message { job?.logs.append(message) }
-                    if let count = job?.logs.count, count > 100 { job?.logs.removeFirst(count - 100) }
+                    if job?.stage != event.stage { stageStartedAt = Date() }
+                    job?.record(event, label: stageLabel(event.stage))
                     do { try job?.save() } catch { failure = error.localizedDescription }
                 }
             }
@@ -352,8 +371,8 @@ struct GamePackageBuildView: View {
             try Task.checkCancellation()
             installing = true
             // Installation is atomic in the importer. Keep the complete archive if it fails.
-            job?.stage = "install"
-            job?.logs.append(stageLabel("install"))
+            stageStartedAt = Date()
+            job?.record(GameBuildProgress(stage: "install", message: ""), label: stageLabel("install"))
             try job?.save()
             try await onBuilt(output)
             try await Task.detached(priority: .utility) { try GameBuildJob.discard() }.value

@@ -2555,5 +2555,8 @@
   "ios.host.sharing.stop": "共有を停止",
   "ios.host.sharing.unavailable": "ゲームパッケージを利用できません",
   "ios.host.Export NXB": "NXBを書き出す",
-  "ios.host.External sharing": "外部共有"
+  "ios.host.External sharing": "外部共有",
+  "ios.host.Time in current step": "現在のステップの経過時間",
+  "ios.host.Files prepared": "準備済みファイル",
+  "ios.host.Waiting for this step to finish. Detailed progress is not available.": "このステップの完了を待っています。詳細な進捗は取得できません。"
 }

@@ -2556,5 +2556,8 @@
   "ios.host.sharing.stop": "공유 중지",
   "ios.host.sharing.unavailable": "게임 패키지를 사용할 수 없음",
   "ios.host.Export NXB": "NXB 내보내기",
-  "ios.host.External sharing": "외부 공유"
+  "ios.host.External sharing": "외부 공유",
+  "ios.host.Time in current step": "현재 단계 경과 시간",
+  "ios.host.Files prepared": "준비된 파일",
+  "ios.host.Waiting for this step to finish. Detailed progress is not available.": "이 단계가 완료되기를 기다리는 중입니다. 상세 진행률은 제공되지 않습니다."
 }
