@@ -11,14 +11,22 @@ public enum ProvisioningProfile {
 
     /// Reads `ExpirationDate` from `Bundle.main`'s `embedded.mobileprovision`, or nil when absent or unreadable.
     public static func bundledExpiration(bundle: Bundle = .main, fileManager fm: FileManager = .default) -> Date? {
-        guard let url = bundle.url(forResource: "embedded", withExtension: "mobileprovision") else { return nil }
+        guard let url = bundledURL(bundle) else { return nil }
         return expiration(at: url, fileManager: fm)
     }
 
     /// Reads `TeamIdentifier` (10-character Apple developer team ID) from `Bundle.main`'s `embedded.mobileprovision`, or nil when absent.
     public static func bundledTeamIdentifier(bundle: Bundle = .main, fileManager fm: FileManager = .default) -> String? {
-        guard let url = bundle.url(forResource: "embedded", withExtension: "mobileprovision") else { return nil }
+        guard let url = bundledURL(bundle) else { return nil }
         return teamIdentifier(at: url, fileManager: fm)
+    }
+
+    private static func bundledURL(_ bundle: Bundle) -> URL? {
+        #if targetEnvironment(macCatalyst)
+        return bundle.bundleURL.appendingPathComponent("Contents/embedded.provisionprofile")
+        #else
+        return bundle.url(forResource: "embedded", withExtension: "mobileprovision")
+        #endif
     }
 
     /// Reads `TeamIdentifier` from a `.mobileprovision` file at `url`, returning nil safely on missing, oversize or damaged files.

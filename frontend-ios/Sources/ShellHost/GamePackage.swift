@@ -36,7 +36,7 @@ public struct GamePackageManifest: Codable, Sendable, Equatable {
         guard schema == 2, runtime == "nxkit", runtimeABI > 0,
               runtimeRevision.utf8.count == 40,
               runtimeRevision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
-              platform == "ios", architecture == "arm64", UUID(uuidString: generation) != nil,
+              ["ios", "maccatalyst"].contains(platform), architecture == "arm64", UUID(uuidString: generation) != nil,
               generation == generation.lowercased(), titleID.utf8.count == 16,
               titleID.utf8.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) }),
               !name.isEmpty, name.utf8.count <= 4096, !name.contains("\0"),

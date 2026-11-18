@@ -1232,6 +1232,10 @@ private struct CertificateFileVersion: Equatable {
         await startupJoinTask?.value
         await looseClaimTask?.value
         guard deepLinkGeneration == generation, !Task.isCancelled else { return }
+        guard packageLauncher?.isGameRunning != true else {
+            failDeepLink(request, message: GameLaunchError.notAvailable.localizedDescription, preserveRunningSession: true)
+            return
+        }
 
         let preserveRunningSession = stoppingRunningGame || !(config.activeRunningGameID() ?? "").isEmpty
 
@@ -1384,7 +1388,7 @@ private struct CertificateFileVersion: Equatable {
     }
 
     private func playInternal(_ id: String, suppressErrorNotice: Bool) async -> LaunchOutcome {
-        guard !launchingGame, !resigningGame, !importingPackage, cloudConflict == nil,
+        guard !launchingGame, !resigningGame, !importingPackage, packageLauncher?.isGameRunning != true, cloudConflict == nil,
               let entry = entry(id), let manifest = entry.manifest, let framework = entry.frameworkURL,
               details.first(where: { $0.id == id })?.game.state == .playable else {
             return .failed(nil)
@@ -1583,7 +1587,7 @@ private struct CertificateFileVersion: Equatable {
 
     @discardableResult
     private func finishLaunch(_ baseGame: LaunchableGame, suppressNotice: Bool = false) async -> String? {
-        guard !resigningGame else { return nil }
+        guard !resigningGame, packageLauncher?.isGameRunning != true else { return GameLaunchError.notAvailable.localizedDescription }
         var game = baseGame
         // Remembered when Play is triggered, even if the launcher then fails (the stub). The order changes at the next load.
         LastPlayedStore(defaults: config.defaults(game.titleID)).record(config.now())

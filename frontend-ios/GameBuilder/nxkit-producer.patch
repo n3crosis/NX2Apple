@@ -1573,10 +1573,10 @@ index 04d5166..4729bea 100644
 +pub use standalone::prepare::{BuildMetadata, prepare_nxb, prepare_nxb_with_progress};
 diff --git a/crates/nxb-build/src/package.rs b/crates/nxb-build/src/package.rs
 new file mode 100644
-index 0000000..faf5aee
+index 0000000..8ffed44
 --- /dev/null
 +++ b/crates/nxb-build/src/package.rs
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,480 @@
 +//! Streaming schema-2 NXB transport, separate from game preparation and signing.
 +
 +use std::collections::BTreeSet;
@@ -1723,7 +1723,11 @@ index 0000000..faf5aee
 +    let manifest = serde_jcs::to_vec(&Manifest {
 +        schema: 2,
 +        runtime: "nxkit",
-+        platform: "ios",
++        platform: if cfg!(target_abi = "macabi") {
++            "maccatalyst"
++        } else {
++            "ios"
++        },
 +        architecture: "arm64",
 +        metadata,
 +        files: &entries,
@@ -2187,7 +2191,7 @@ index ae6d4b7..6c2306f 100644
 +}
 diff --git a/crates/nxb-build/src/standalone/analysis.rs b/crates/nxb-build/src/standalone/analysis.rs
 new file mode 100644
-index 0000000..aad6e49
+index 0000000..6cf14c5
 --- /dev/null
 +++ b/crates/nxb-build/src/standalone/analysis.rs
 @@ -0,0 +1,309 @@
@@ -2427,7 +2431,7 @@ index 0000000..aad6e49
 +            if cmd == 0x32 {
 +                assert_eq!(
 +                    u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()),
-+                    2
++                    if cfg!(target_abi = "macabi") { 6 } else { 2 }
 +                );
 +                assert_eq!(
 +                    u32::from_le_bytes(bytes[at + 12..at + 16].try_into().unwrap()),
@@ -4213,7 +4217,7 @@ index 46eb150..1355f54 100644
  
  fn put(path: &Path, bytes: &[u8]) -> Result<(), String> {
 diff --git a/crates/nxb-build/src/standalone/macho.rs b/crates/nxb-build/src/standalone/macho.rs
-index 75adc41..374ebe4 100644
+index 75adc41..362511f 100644
 --- a/crates/nxb-build/src/standalone/macho.rs
 +++ b/crates/nxb-build/src/standalone/macho.rs
 @@ -1,6 +1,6 @@
@@ -4248,7 +4252,7 @@ index 75adc41..374ebe4 100644
 +    // Recipient signing needs room for both SHA-1/SHA-256 page hashes and the
 +    // certificate/CMS blobs. Keep desktop output unchanged.
 +    let signature_offset = off + 16;
-+    let signature_size = if platform == 2 {
++    let signature_size = if matches!(platform, 2 | 6) {
 +        (signature_offset.div_ceil(4096) * (20 + 32) + 64 * 1024).div_ceil(PAGE) * PAGE
 +    } else {
 +        0
@@ -4382,10 +4386,10 @@ index 811a11c..4b595ae 100644
          if id != *want_id {
 diff --git a/crates/nxb-build/src/standalone/prepare.rs b/crates/nxb-build/src/standalone/prepare.rs
 new file mode 100644
-index 0000000..3d9062b
+index 0000000..50bfaee
 --- /dev/null
 +++ b/crates/nxb-build/src/standalone/prepare.rs
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,217 @@
 +//! The module and manifest stages without a CLI, subprocesses or game data copies.
 +use super::{analysis, auto_shaders, extract, link};
 +use std::path::Path;
@@ -4404,7 +4408,8 @@ index 0000000..3d9062b
 +    let npdm = game.npdm;
 +    drop(game.modules);
 +    stage(report, "link")?;
-+    let dylib = link::dylib_for(&analyzed.modules, 2, minimum_version)?;
++    let platform = if cfg!(target_abi = "macabi") { 6 } else { 2 };
++    let dylib = link::dylib_for(&analyzed.modules, platform, minimum_version)?;
 +    std::fs::create_dir(output).map_err(|e| e.to_string())?;
 +    let result = (|| {
 +        link::module_files(output, &analyzed.modules, |_, _| {})?;
@@ -4442,7 +4447,7 @@ index 0000000..3d9062b
 +) -> Result<(), String> {
 +    stage(report, "shaders")?;
 +    let (files, directories) = resource_files(resources)?;
-+    let shaders = auto_shaders::discover_paths(&input.modules, &files, true)?;
++    let shaders = auto_shaders::discover_paths(&input.modules, &files, !cfg!(target_abi = "macabi"))?;
 +    prepare_game(input, output, minimum_version, report)?;
 +    stage(report, "resources")?;
 +    let result = (|| {

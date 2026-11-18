@@ -26,10 +26,15 @@ import UIKit
     func checkCompatibility(_ manifest: GamePackageManifest) throws {
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let current = "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
+        #if targetEnvironment(macCatalyst)
+        let platform = "maccatalyst"
+        #else
+        let platform = "ios"
+        #endif
         guard manifest.runtime == "nxkit", manifest.runtimeRevision == revision,
-              manifest.runtimeABI == abi, manifest.platform == "ios", manifest.architecture == "arm64",
+              manifest.runtimeABI == abi, manifest.platform == platform, manifest.architecture == "arm64",
               current.compare(manifest.minOS, options: .numeric) != .orderedAscending else {
-            throw GamePackageError.invalid("this game requires a different runtime build or iOS version")
+            throw GamePackageError.invalid("this game requires a different runtime build or operating system version")
         }
     }
 

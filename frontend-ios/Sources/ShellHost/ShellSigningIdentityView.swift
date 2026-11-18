@@ -17,6 +17,14 @@ public struct ShellSigningIdentityView: View {
     @State private var saved = false
     @State private var removing = false
     @State private var message: String?
+    private var profileExtension: String {
+        #if targetEnvironment(macCatalyst)
+        "provisionprofile"
+        #else
+        "mobileprovision"
+        #endif
+    }
+
     private let store: ShellSigningIdentityStore
 
     public init(store: ShellSigningIdentityStore = .init()) { self.store = store }
@@ -102,7 +110,7 @@ public struct ShellSigningIdentityView: View {
         #endif
         .interactiveDismissDisabled(saving || picking || loading)
         .fileImporter(isPresented: $picking,
-                      allowedContentTypes: [UTType(filenameExtension: selectingProfile ? "mobileprovision" : "p12",
+                      allowedContentTypes: [UTType(filenameExtension: selectingProfile ? profileExtension : "p12",
                                                    conformingTo: .data)].compactMap { $0 },
                       allowsMultipleSelection: false) { result in
             receive(result)
@@ -145,7 +153,7 @@ public struct ShellSigningIdentityView: View {
         guard case .success(let urls) = result, let url = urls.first else { return }
         guard !loading else { return }
         let isProfile = selectingProfile
-        let expected = isProfile ? "mobileprovision" : "p12"
+        let expected = isProfile ? profileExtension : "p12"
         guard url.pathExtension.lowercased() == expected else {
             message = hostText("Choose a valid P12 certificate or provisioning profile.")
             return

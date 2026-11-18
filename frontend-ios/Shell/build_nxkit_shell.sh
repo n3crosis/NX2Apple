@@ -5,6 +5,8 @@
 # NXKIT_RUNTIME_ABI: the compatibility ABI used by the producer. Revision identifies the patched source tree.
 # SHELL_DIR: generated project/artifacts outside the repository. No engine or game data is copied.
 # --prepare-xcode builds Rust and generates the project; --build also packages an unsigned device IPA for signing/sideloading.
+# SHELL_PLATFORM=maccatalyst builds the same UIKit shell as a native Mac app.
+# A Mac build requires DM_TEAM_ID and DM_SIGNING_IDENTITY; game payloads remain separate.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
 MODE=${1:-}
@@ -17,6 +19,17 @@ export DM_SHELL_PACKAGE=${DM_SHELL_PACKAGE:-$(cd "$ROOT/.." && pwd)}
 export DM_BUNDLE_ID=${DM_BUNDLE_ID:-org.nxnative.shell} DM_TEAM_ID=${DM_TEAM_ID:-0000000000}
 export DM_SHELL_NAME=${DM_SHELL_NAME:-NX2Apple} DM_APP_VERSION=${DM_APP_VERSION:-1.0}
 export NXKIT_RUNTIME_ABI
+export SHELL_PLATFORM=${SHELL_PLATFORM:-ios}
+case "$SHELL_PLATFORM" in
+  ios) RUST_TARGET=aarch64-apple-ios; APPLE_SDK=iphoneos; DESTINATION='generic/platform=iOS' ;;
+  maccatalyst)
+    RUST_TARGET=aarch64-apple-ios-macabi; APPLE_SDK=macosx
+    DESTINATION='generic/platform=macOS,variant=Mac Catalyst'
+    : "${DM_SIGNING_IDENTITY:?set a certificate signing identity for the Mac shell}"
+    [ "$DM_TEAM_ID" != 0000000000 ] || { echo 'Set DM_TEAM_ID for the Mac shell.' >&2; exit 1; }
+    ;;
+  *) echo 'SHELL_PLATFORM must be ios or maccatalyst.' >&2; exit 1 ;;
+esac
 mkdir -p "$SHELL_DIR"
 S=$(cd "$SHELL_DIR" && pwd)
 REPO=$(cd "$ROOT/../.." && pwd)
@@ -46,9 +59,10 @@ text = pathlib.Path(sys.argv[1]).read_text()
 text = text.replace('../nxkit/crates/nxb-build', os.environ['NXKIT_SOURCE'] + '/crates/nxb-build')
 pathlib.Path(sys.argv[2]).write_text(text)
 BRIDGE
-export NXKIT_ARTIFACT_DIR="$S/Rust/aarch64-apple-ios/release"
-export SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
+export NXKIT_ARTIFACT_DIR="$S/Rust/$RUST_TARGET/release"
+export SDKROOT=$(xcrun --sdk "$APPLE_SDK" --show-sdk-path)
 export IPHONEOS_DEPLOYMENT_TARGET=26.0
+export MACOSX_DEPLOYMENT_TARGET=26.0
 # One staticlib owns the Rust runtime/allocator for both producer and player.
 # The local crate is build glue, not a vendored copy or a remote fork dependency.
 python3 -I - "$S/Native" <<'NATIVE'
@@ -77,7 +91,7 @@ cp "$NXKIT_SOURCE/Cargo.lock" "$S/Native/Cargo.lock"
 cargo metadata --manifest-path "$S/Native/Cargo.toml" --format-version 1 > /dev/null
 # Rust reports transitive Apple frameworks and native libraries; do not maintain a second list.
 cargo rustc --manifest-path "$S/Native/Cargo.toml" --locked --release \
-  --target aarch64-apple-ios --target-dir "$S/Rust" --lib \
+  --target "$RUST_TARGET" --target-dir "$S/Rust" --lib \
   -- --print native-static-libs 2>&1 | tee "$S/runtime-build.log"
 [ -s "$NXKIT_ARTIFACT_DIR/libnxkit_host.a" ]
 mkdir -p "$S/Gen/dm" "$S/Gen/Assets.xcassets"
@@ -110,6 +124,15 @@ text = text.replace('        CFBundleDisplayName:', '''        CFBundleDocumentT
         CFBundleDisplayName:''')
 text = text.replace('        CFBundleDisplayName:', f'        NXKitRuntimeRevision: "{revision}"\n        NXKitRuntimeABI: {abi}\n        CFBundleDisplayName:')
 text = '\n'.join(line for line in text.splitlines() if '# @FRAMEWORKS@' not in line) + '\n'
+if os.environ['SHELL_PLATFORM'] == 'maccatalyst':
+    text = text.replace('@executable_path/Frameworks', '@executable_path/../Frameworks')
+    text = text.replace('-mcpu=apple-a18', '-mcpu=apple-m1')
+    text = text.replace('      TARGETED_DEVICE_FAMILY:',
+        '      SUPPORTS_MACCATALYST: YES\n'
+        '      DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO\n'
+        '      MACOSX_DEPLOYMENT_TARGET: "26.0"\n'
+        '      ARCHS: arm64\n'
+        '      TARGETED_DEVICE_FAMILY:')
 (out / 'project.yml').write_text(text)
 archive_dir = os.environ['NXKIT_ARTIFACT_DIR']
 (out / 'Gen/dm.xcconfig').write_text(
@@ -120,10 +143,22 @@ PY
 cd "$S"
 xcodegen generate
 if [ "$MODE" = --build ]; then
+  SIGNING=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=)
+  if [ "$SHELL_PLATFORM" = maccatalyst ]; then
+    SIGNING=(CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES "CODE_SIGN_IDENTITY=$DM_SIGNING_IDENTITY")
+  fi
   xcodebuild -project DmShell.xcodeproj -scheme DmShell -configuration Release \
-    -destination 'generic/platform=iOS' -derivedDataPath "$S/dd" \
-    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build \
+    -destination "$DESTINATION" -derivedDataPath "$S/dd" \
+    "${SIGNING[@]}" build \
     > "$S/build.log" 2>&1
+  if [ "$SHELL_PLATFORM" = maccatalyst ]; then
+    APP="$S/dd/Build/Products/Release-maccatalyst/DmShell.app"
+    codesign --verify --strict "$APP"
+    ditto --norsrc "$APP" "$S/DmShell.app"
+    echo "Signed Mac shell: $S/DmShell.app"
+    echo 'Payload signing and loading still require validation on the target Mac.'
+    exit 0
+  fi
   APP="$S/dd/Build/Products/Release-iphoneos/DmShell.app"
   STAGE=$(mktemp -d "$S/ipa.XXXXXX")
   trap 'rm -rf "$STAGE"' EXIT

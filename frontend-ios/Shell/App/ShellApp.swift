@@ -67,12 +67,6 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
     @MainActor private static weak var activeModel: ShellHostModel?
     @MainActor private static var pendingOpenURL: URL?
 
-    @MainActor @objc static func openPackage(_ url: URL) {
-        guard url.isFileURL, url.pathExtension.lowercased() == "nxb", let model = activeModel else { return }
-        // Files/AirDrop enters the same private-copy and review sheet as the picker. Never auto-install.
-        model.enqueueExternalPackage(url)
-    }
-
     @MainActor @objc static func makeController() -> UIViewController {
         makeController(initialURL: nil)
     }
@@ -115,7 +109,7 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
         let resolvedInitialURL = initialURL ?? pendingOpenURL
         pendingOpenURL = nil
         if let resolvedInitialURL {
-            _ = model.handleDeepLink(resolvedInitialURL)
+            _ = handleOpenURL(resolvedInitialURL)
         } else if let id = ProcessInfo.processInfo.environment["DM_SHELL_PLAY"], !id.isEmpty {
             // DM_SHELL_PLAY=<title ID> in the launch environment (devicectl process launch --environment-variables, the Mac launcher's
             // Play on device) starts that game as Play in the library would, through the same launcher
@@ -150,10 +144,15 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
     }
 
     @MainActor @objc(handleOpenURL:) static func handleOpenURL(_ url: URL) -> Bool {
+        let isPackage = url.isFileURL && url.pathExtension.lowercased() == "nxb"
         if let activeModel {
+            if isPackage {
+                activeModel.enqueueExternalPackage(url)
+                return true
+            }
             return activeModel.handleDeepLink(url)
         }
-        guard DeepLinkRouter.isLaunchURL(url) else { return false }
+        guard isPackage || DeepLinkRouter.isLaunchURL(url) else { return false }
         pendingOpenURL = url
         return true
     }
