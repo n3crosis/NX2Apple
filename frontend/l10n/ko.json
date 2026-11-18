@@ -2538,5 +2538,13 @@
   "xcodeChoice.reset": "시스템 Xcode 사용",
   "xcodeChoice.system": "macOS에서 선택된 Xcode를 사용합니다.",
   "xcodeChoice.title": "NX2Apple용 Xcode",
-  "xcodeChoice.unavailable": "선택한 Xcode가 들어 있는 드라이브를 다시 연결하거나 다른 사본을 고르세요."
+  "xcodeChoice.unavailable": "선택한 Xcode가 들어 있는 드라이브를 다시 연결하거나 다른 사본을 고르세요.",
+  "ios.host.sharing.receive": "게임 받기",
+  "ios.host.sharing.link": "공유 링크",
+  "ios.host.sharing.scan": "QR 코드 스캔",
+  "ios.host.sharing.receiving": "게임 받는 중",
+  "ios.host.sharing.invalid": "유효하지 않은 공유 링크",
+  "ios.host.sharing.share_link": "링크 공유",
+  "ios.host.sharing.instructions": "같은 네트워크의 다른 기기에서 스캔하세요. 전송이 완료될 때까지 이 화면을 열어 두세요.",
+  "ios.host.sharing.title": "게임 공유"
 }

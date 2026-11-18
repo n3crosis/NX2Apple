@@ -2538,5 +2538,13 @@
   "xcodeChoice.reset": "Xcode du système",
   "xcodeChoice.system": "Utiliser l’Xcode sélectionné dans macOS.",
   "xcodeChoice.title": "Xcode pour NX2Apple",
-  "xcodeChoice.unavailable": "Reconnectez le disque contenant l’Xcode sélectionné ou choisissez une autre copie."
+  "xcodeChoice.unavailable": "Reconnectez le disque contenant l’Xcode sélectionné ou choisissez une autre copie.",
+  "ios.host.sharing.receive": "Recevoir un jeu",
+  "ios.host.sharing.link": "Lien de partage",
+  "ios.host.sharing.scan": "Scanner le code QR",
+  "ios.host.sharing.receiving": "Réception du jeu",
+  "ios.host.sharing.invalid": "Lien de partage invalide",
+  "ios.host.sharing.share_link": "Partager le lien",
+  "ios.host.sharing.instructions": "Scannez avec un autre appareil sur le même réseau. Gardez cet écran ouvert jusqu’à la fin du transfert.",
+  "ios.host.sharing.title": "Partager le jeu"
 }

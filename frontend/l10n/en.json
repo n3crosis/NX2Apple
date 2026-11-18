@@ -2537,5 +2537,13 @@
   "xcodeChoice.reset": "Use system Xcode",
   "xcodeChoice.system": "Use the Xcode selected in macOS.",
   "xcodeChoice.title": "Xcode for NX2Apple",
-  "xcodeChoice.unavailable": "Reconnect the drive containing the selected Xcode or choose another copy."
+  "xcodeChoice.unavailable": "Reconnect the drive containing the selected Xcode or choose another copy.",
+  "ios.host.sharing.receive": "Receive game",
+  "ios.host.sharing.link": "Sharing link",
+  "ios.host.sharing.scan": "Scan QR code",
+  "ios.host.sharing.receiving": "Receiving game",
+  "ios.host.sharing.invalid": "Invalid sharing link",
+  "ios.host.sharing.share_link": "Share link",
+  "ios.host.sharing.instructions": "Scan on another device on the same network. Keep this screen open until the transfer finishes.",
+  "ios.host.sharing.title": "Share game"
 }

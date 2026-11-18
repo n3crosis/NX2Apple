@@ -304,6 +304,7 @@ public struct LibraryView: View {
     var menuActions: ShellActions {
         var routed = guardedActions
         routed.onPlay = { id in handOffMenu { actions.onPlay(id) } }
+        routed.onSharePackage = { id in handOffMenu { actions.onSharePackage(id) } }
         routed.onShowLog = { id in handOffMenu { actions.onShowLog(id) } }
         routed.onAppUpdate = { handOffMenu { actions.onAppUpdate() } }
         routed.onImportSigningIdentity = {

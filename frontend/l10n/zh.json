@@ -2538,5 +2538,13 @@
   "xcodeChoice.reset": "使用系统 Xcode",
   "xcodeChoice.system": "使用 macOS 中选定的 Xcode。",
   "xcodeChoice.title": "NX2Apple 使用的 Xcode",
-  "xcodeChoice.unavailable": "请重新连接存有已选 Xcode 的驱动器，或选择另一份 Xcode。"
+  "xcodeChoice.unavailable": "请重新连接存有已选 Xcode 的驱动器，或选择另一份 Xcode。",
+  "ios.host.sharing.receive": "接收游戏",
+  "ios.host.sharing.link": "分享链接",
+  "ios.host.sharing.scan": "扫描二维码",
+  "ios.host.sharing.receiving": "正在接收游戏",
+  "ios.host.sharing.invalid": "分享链接无效",
+  "ios.host.sharing.share_link": "分享链接",
+  "ios.host.sharing.instructions": "在同一网络的另一台设备上扫描。请保持此页面打开，直到传输完成。",
+  "ios.host.sharing.title": "分享游戏"
 }

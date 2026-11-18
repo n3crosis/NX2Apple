@@ -44,7 +44,11 @@ targets:
         UILaunchScreen: {}
         UIFileSharingEnabled: true          # Documents (log.txt, shell-log.txt, games/<id>/) visible in the Files app
         LSSupportsOpeningDocumentsInPlace: true
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: "Transfers games directly between your devices on the same network."
         NSPhotoLibraryAddUsageDescription: "Saves square game icons to Photos so you can use them on the Home Screen."
+        NSCameraUsageDescription: "Scans a sharing code to receive a game from another device."
         CFBundleURLTypes:
           - CFBundleURLName: org.nxnative.shell
             CFBundleURLRole: Editor

@@ -215,8 +215,8 @@ public struct GameDetailView: View {
                     .shellText(12.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
-        if let archive = detail.shareArchive {
-            ShareLink(item: archive) {
+        if detail.canShare {
+            Button { actions.onSharePackage(detail.id) } label: {
                 Label(ShellStrings.text("Share game"), systemImage: "square.and.arrow.up")
             }
             .disabled(resigning || signingShare)

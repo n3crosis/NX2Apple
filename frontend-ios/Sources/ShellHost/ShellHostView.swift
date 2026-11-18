@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 /// launch arguments of the demo (initial selection and so on) are not part of it.
 public struct ShellHostView: View {
     @Bindable private var model: ShellHostModel
+    @State private var receivingPackage = false
+    @State private var receiverPresented = false
     @State private var pickingPackage = false
     @State private var buildingPackage = false
     private let buildGame: GamePackageBuild?
@@ -20,7 +22,7 @@ public struct ShellHostView: View {
     }
 
     private var libraryInputEnabled: Bool {
-        !buildingPackage && !pickingPackage && model.canPreparePackage
+        !receivingPackage && model.sharingPackage == nil && !buildingPackage && !pickingPackage && model.canPreparePackage
     }
 
     private var canPrepareExternalPackage: Bool { libraryInputEnabled && model.hasExternalPackage }
@@ -47,6 +49,12 @@ public struct ShellHostView: View {
                         case .failure(let error): model.notice = error.localizedDescription
                         }
                     }
+                    .sheet(item: $model.sharingPackage) { entry in
+                        GamePackageShareView(entry: entry)
+                    }
+                    .sheet(isPresented: $receivingPackage, onDismiss: { receiverPresented = false }) {
+                        GamePackageReceiveView(model: model) { receivingPackage = false }
+                    }
                     .sheet(isPresented: $buildingPackage) {
                         if let buildGame {
                             GamePackageBuildView(build: buildGame) { output in
@@ -54,7 +62,7 @@ public struct ShellHostView: View {
                             }
                         }
                     }
-                    .sheet(item: Binding(get: { model.packagePreview }, set: { if case nil = $0 { model.cancelPackageImport() } })) { prepared in
+                    .sheet(item: Binding(get: { receiverPresented ? nil : model.packagePreview }, set: { if case nil = $0 { model.cancelPackageImport() } })) { prepared in
                         GamePackageImportView(preview: prepared.preview, importing: model.importingPackage,
                             onImport: { Task { await model.importPackage() } }, onCancel: { model.cancelPackageImport() })
                             .interactiveDismissDisabled(model.importingPackage)
@@ -103,20 +111,14 @@ public struct ShellHostView: View {
             .onDisappear { model.stopControllers() }
     }
     @ViewBuilder private var importButton: some View {
-        if buildGame != nil {
-            Menu {
-                Button(hostText("Import prebuilt games")) { pickingPackage = true }
-                Button(hostText("Build games")) { buildingPackage = true }
-            } label: {
-                Label(hostText("Import prebuilt games"), systemImage: "square.and.arrow.down")
-            }
-            .disabled(!libraryInputEnabled || model.isGameRunning)
-        } else {
-            Button { pickingPackage = true } label: {
-                Label(hostText("Import prebuilt games"), systemImage: "square.and.arrow.down")
-            }
-            .disabled(!libraryInputEnabled || model.isGameRunning)
+        Menu {
+            Button(hostText("Import prebuilt games")) { pickingPackage = true }
+            Button(hostText("Receive game")) { receiverPresented = true; receivingPackage = true }
+            if buildGame != nil { Button(hostText("Build games")) { buildingPackage = true } }
+        } label: {
+            Label(hostText("Import prebuilt games"), systemImage: "square.and.arrow.down")
         }
+        .disabled(!libraryInputEnabled || model.isGameRunning)
     }
 
 }

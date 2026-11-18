@@ -2538,5 +2538,13 @@
   "xcodeChoice.reset": "Använd system-Xcode",
   "xcodeChoice.system": "Använd den Xcode som är vald i macOS.",
   "xcodeChoice.title": "Xcode för NX2Apple",
-  "xcodeChoice.unavailable": "Anslut disken med den valda Xcode igen eller välj en annan kopia."
+  "xcodeChoice.unavailable": "Anslut disken med den valda Xcode igen eller välj en annan kopia.",
+  "ios.host.sharing.receive": "Ta emot spel",
+  "ios.host.sharing.link": "Delningslänk",
+  "ios.host.sharing.scan": "Skanna QR-kod",
+  "ios.host.sharing.receiving": "Tar emot spel",
+  "ios.host.sharing.invalid": "Ogiltig delningslänk",
+  "ios.host.sharing.share_link": "Dela länk",
+  "ios.host.sharing.instructions": "Skanna med en annan enhet på samma nätverk. Håll skärmen öppen tills överföringen är klar.",
+  "ios.host.sharing.title": "Dela spel"
 }

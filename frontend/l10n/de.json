@@ -2539,5 +2539,13 @@
   "xcodeChoice.reset": "System-Xcode verwenden",
   "xcodeChoice.system": "Verwendet das in macOS ausgewählte Xcode.",
   "xcodeChoice.title": "Xcode für NX2Apple",
-  "xcodeChoice.unavailable": "Schließe das Laufwerk mit dem ausgewählten Xcode wieder an oder wähle eine andere Kopie."
+  "xcodeChoice.unavailable": "Schließe das Laufwerk mit dem ausgewählten Xcode wieder an oder wähle eine andere Kopie.",
+  "ios.host.sharing.receive": "Spiel empfangen",
+  "ios.host.sharing.link": "Freigabelink",
+  "ios.host.sharing.scan": "QR-Code scannen",
+  "ios.host.sharing.receiving": "Spiel wird empfangen",
+  "ios.host.sharing.invalid": "Ungültiger Freigabelink",
+  "ios.host.sharing.share_link": "Link teilen",
+  "ios.host.sharing.instructions": "Auf einem anderen Gerät im selben Netzwerk scannen. Diesen Bildschirm bis zum Ende der Übertragung geöffnet lassen.",
+  "ios.host.sharing.title": "Spiel teilen"
 }

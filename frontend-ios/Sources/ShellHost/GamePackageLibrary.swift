@@ -7,6 +7,23 @@ import Darwin
 /// are stored once; only the executable keeps a transport and a locally signed copy.
 public struct GamePackageLibrary: Sendable {
     private static let activationLock = NSRecursiveLock()
+    // Protected by activationLock, including prune/remove in other windows.
+    nonisolated(unsafe) private static var sharingDirectories: [URL: Int] = [:]
+
+    static func retainSharing(_ directory: URL) {
+        activationLock.lock()
+        defer { activationLock.unlock() }
+        sharingDirectories[directory.standardizedFileURL, default: 0] += 1
+    }
+
+    static func releaseSharing(_ directory: URL) {
+        activationLock.lock()
+        defer { activationLock.unlock() }
+        let key = directory.standardizedFileURL
+        let count = sharingDirectories[key, default: 0]
+        if count <= 1 { sharingDirectories.removeValue(forKey: key) }
+        else { sharingDirectories[key] = count - 1 }
+    }
     public struct Prepared: Sendable, Identifiable {
         public let id: UUID
         public let directory: URL
@@ -142,7 +159,9 @@ public struct GamePackageLibrary: Sendable {
             let active = try? String(contentsOf: directory.appendingPathComponent("active"), encoding: .utf8)
             for generation in try fm.contentsOfDirectory(atPath: directory.path) where UUID(uuidString: generation) != nil && generation != active {
                 let url = directory.appendingPathComponent(generation, isDirectory: true)
-                if !loaded.contains(url) { try fm.removeItem(at: url) }
+                if !loaded.contains(url), Self.sharingDirectories[url.standardizedFileURL] == nil {
+                    try fm.removeItem(at: url)
+                }
             }
             if try fm.contentsOfDirectory(atPath: directory.path).isEmpty { try fm.removeItem(at: directory) }
         }

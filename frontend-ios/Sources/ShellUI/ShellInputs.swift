@@ -160,13 +160,13 @@ public struct GameDetail: Identifiable, Equatable, Sendable {
     public var latestSaveBackup: String?
     /// The host permits re-signing this imported game. Bundled games never expose the action.
     public var canResign: Bool
-    public var shareArchive: URL?
+    public var canShare: Bool
     /// Earlier expiration of the game signing certificate and app provisioning profile, only when both are known.
     public var signingExpiration: Date?
     public init(game: GameTile, sections: [SettingSection] = [], dataSource: String = "", dataNote: String = "",
                 cloudSaves: String? = nil, cloudNote: String = "", dlc: String = "", hasModifiedSettings: Bool = false,
                 dataFromShell: Bool = false, cloudFromShell: Bool = false, cloudCanUseShell: Bool = false,
-                latestSaveBackup: String? = nil, canResign: Bool = false, signingExpiration: Date? = nil, shareArchive: URL? = nil, showsDataSettings: Bool = true) {
+                latestSaveBackup: String? = nil, canResign: Bool = false, signingExpiration: Date? = nil, canShare: Bool = false, showsDataSettings: Bool = true) {
         self.game = game
         self.sections = sections
         self.showsDataSettings = showsDataSettings
@@ -181,7 +181,7 @@ public struct GameDetail: Identifiable, Equatable, Sendable {
         self.cloudCanUseShell = cloudCanUseShell
         self.latestSaveBackup = latestSaveBackup
         self.canResign = canResign
-        self.shareArchive = shareArchive
+        self.canShare = canShare
         self.signingExpiration = signingExpiration
     }
 }
@@ -315,6 +315,7 @@ public struct ShellActions {
     /// Performs signing while Settings shows progress. The host defers result presentation.
     public var onResignGame: (String) async -> Void
     /// Creates a temporary publisher-signed copy. The view discards it after sharing.
+    public var onSharePackage: (String) -> Void
     public var onSignPackage: (String) async throws -> URL?
     public var onDiscardSignedPackage: (URL) -> Void
     /// Keeps launcher input out of the active export, share sheet or error alert.
@@ -348,6 +349,7 @@ public struct ShellActions {
                 onRestoreSaveBackup: @escaping (String) -> Void = { _ in },
                 onDeleteGame: @escaping (String, Bool) -> Void = { _, _ in },
                 onResignGame: @escaping (String) async -> Void = { _ in },
+                onSharePackage: @escaping (String) -> Void = { _ in },
                 onSignPackage: @escaping (String) async throws -> URL? = { _ in nil },
                 onDiscardSignedPackage: @escaping (URL) -> Void = { _ in },
                 onPackageShareActivity: @escaping (Bool) -> Void = { _ in },
@@ -379,6 +381,7 @@ public struct ShellActions {
         self.onRestoreSaveBackup = onRestoreSaveBackup
         self.onDeleteGame = onDeleteGame
         self.onResignGame = onResignGame
+        self.onSharePackage = onSharePackage
         self.onSignPackage = onSignPackage
         self.onDiscardSignedPackage = onDiscardSignedPackage
         self.onPackageShareActivity = onPackageShareActivity

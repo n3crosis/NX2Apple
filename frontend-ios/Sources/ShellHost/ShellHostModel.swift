@@ -138,12 +138,13 @@ private struct CertificateFileVersion: Equatable {
     public private(set) var details: [GameDetail] = []
     public private(set) var entries: [CatalogueEntry] = []
     public private(set) var packages: [GamePackageLibrary.Entry] = []
+    public var sharingPackage: GamePackageLibrary.Entry?
     public var packagePreview: GamePackageLibrary.Prepared?
     public private(set) var importingPackage = false
     @ObservationIgnored private var externalPackages: [(url: URL, scoped: Bool)] = []
     public private(set) var hasExternalPackage = false
     var canPreparePackage: Bool {
-        !importingPackage && packagePreview == nil && !isGameRunning && !launchingGame && !resigningGame &&
+        !importingPackage && packagePreview == nil && sharingPackage == nil && !isGameRunning && !launchingGame && !resigningGame &&
             !importingSigningIdentity && cloudConflict == nil && log == nil && notice == nil
     }
     @ObservationIgnored private let packageLauncher: (any GamePackageLauncher)?
@@ -554,7 +555,7 @@ private struct CertificateFileVersion: Equatable {
     private func reload(afterClaim: Bool) {
         guard !resigningGame else { return }
         // Imports and completed re-signs reload the catalogue, including replacements at the same path.
-        try? packageLibrary.prune(preserving: GamePackageSession.loadedDirectories)
+        try? packageLibrary.prune(preserving: GamePackageSession.loadedDirectories.union(sharingPackage.map { [$0.directory] } ?? []))
         packages = packageLibrary.entries()
         certificateExpirations.removeAll(keepingCapacity: true)
         forgetCheckedRomfsImages()
@@ -937,6 +938,10 @@ private struct CertificateFileVersion: Equatable {
             onRestoreSaveBackup: { [weak self] id in self?.restoreLatestSaveBackup(id) },
             onDeleteGame: { [weak self] id, saves in self?.deleteGame(id, saves: saves) },
             onResignGame: { [weak self] id in await self?.resignGame(id) },
+            onSharePackage: { [weak self] id in
+                guard let self, self.canPreparePackage else { return }
+                self.sharingPackage = self.packages.first { "nxb:" + $0.id == id }
+            },
             onSignPackage: { [weak self] id in try await self?.signPackageForSharing(id) },
             onDiscardSignedPackage: { url in try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) },
             onShowSigningResult: { [weak self] in self?.showSigningResult() },
@@ -1751,7 +1756,7 @@ extension ShellHostModel {
             }
             return GameDetail(game: GameTile(id: "nxb:" + entry.id, title: entry.manifest.name,
                 icon: image(entry.runRoot.appendingPathComponent("icon.jpg")), state: state, settingsAvailable: true),
-                canResign: true, signingExpiration: packageExpiration(entry), shareArchive: entry.archive, showsDataSettings: false)
+                canResign: true, signingExpiration: packageExpiration(entry), canShare: true, showsDataSettings: false)
         }
     }
 
@@ -1782,6 +1787,31 @@ extension ShellHostModel {
             }.value
             return true
         } catch { notice = error.localizedDescription; return false }
+    }
+
+    func receivePackage(_ client: GamePackageShareClient,
+                        progress: @escaping @Sendable (UInt64, UInt64) -> Void) async throws {
+        guard canPreparePackage else { throw GamePackageError.invalid("library is busy") }
+        importingPackage = true
+        defer { importingPackage = false }
+        let library = packageLibrary
+        let directory = try await client.receive(in: library.root, progress: progress)
+        do {
+            try Task.checkCancellation()
+            let preparation = Task.detached(priority: .userInitiated) {
+                try library.prepareDirectory(directory)
+            }
+            let prepared = try await withTaskCancellationHandler {
+                try await preparation.value
+            } onCancel: {
+                preparation.cancel()
+            }
+            if Task.isCancelled { library.discard(prepared); throw CancellationError() }
+            packagePreview = prepared
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
     }
 
     public func cancelPackageImport() {

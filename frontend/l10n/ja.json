@@ -2537,5 +2537,13 @@
   "xcodeChoice.reset": "システムの Xcode を使う",
   "xcodeChoice.system": "macOS で選択されている Xcode を使います。",
   "xcodeChoice.title": "NX2Apple 用の Xcode",
-  "xcodeChoice.unavailable": "選択した Xcode が入ったドライブを再接続するか、別のコピーを選んでください。"
+  "xcodeChoice.unavailable": "選択した Xcode が入ったドライブを再接続するか、別のコピーを選んでください。",
+  "ios.host.sharing.receive": "ゲームを受信",
+  "ios.host.sharing.link": "共有リンク",
+  "ios.host.sharing.scan": "QRコードをスキャン",
+  "ios.host.sharing.receiving": "ゲームを受信中",
+  "ios.host.sharing.invalid": "無効な共有リンク",
+  "ios.host.sharing.share_link": "リンクを共有",
+  "ios.host.sharing.instructions": "同じネットワーク上の別のデバイスでスキャンしてください。転送が完了するまでこの画面を開いたままにしてください。",
+  "ios.host.sharing.title": "ゲームを共有"
 }

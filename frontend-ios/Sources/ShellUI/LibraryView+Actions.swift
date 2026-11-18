@@ -36,6 +36,7 @@ extension LibraryView {
         a.onRestoreSaveBackup = { if !echo() { o.onRestoreSaveBackup($0) } }
         a.onDeleteGame = { if !echo() { o.onDeleteGame($0, $1) } }
         a.onResignGame = { if !echo() { await o.onResignGame($0) } }
+        a.onSharePackage = { if !echo() { o.onSharePackage($0) } }
         a.onSignPackage = { if echo() { return nil }; return try await o.onSignPackage($0) }
         a.onOpenHomeButtonSettings = { if !echo() { o.onOpenHomeButtonSettings() } }
         a.onCopyShortcutURL = o.onCopyShortcutURL.map { copy in
