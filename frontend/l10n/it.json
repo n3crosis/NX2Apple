@@ -2551,5 +2551,8 @@
   "ios.host.sharing.internet": "Condividi via Internet",
   "ios.host.sharing.disclosure": "Cloudflare può leggere i dati di gioco trasferiti. Chiunque abbia il link può scaricarli.",
   "ios.host.sharing.remote_instructions": "Scansiona questo link o incollalo in NX2Apple su un altro dispositivo. Tieni aperta questa schermata fino al termine del trasferimento.",
-  "ios.host.sharing.allow_internet": "Consenti trasferimento via Internet"
+  "ios.host.sharing.allow_internet": "Consenti trasferimento via Internet",
+  "ios.host.sharing.save_file": "Salva su file",
+  "ios.host.sharing.stop": "Interrompi condivisione",
+  "ios.host.sharing.unavailable": "Pacchetto del gioco non disponibile"
 }

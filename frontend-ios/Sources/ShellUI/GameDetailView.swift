@@ -44,7 +44,9 @@ public struct GameDetailView: View {
         .onChange(of: signingShare || showingSignedShare || shareError != nil) { _, active in
             actions.onPackageShareActivity(active)
         }
-        .onDisappear { actions.onPackageShareActivity(false) }
+        .onDisappear {
+            if actions.packageSharePage == nil { actions.onPackageShareActivity(false) }
+        }
         .task(id: signingShare) {
             guard signingShare else { return }
             defer { signingShare = false }
@@ -215,7 +217,15 @@ public struct GameDetailView: View {
                     .shellText(12.5).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
-        if detail.canShare {
+        if detail.canShare, let page = actions.packageSharePage {
+            NavigationLink {
+                page(detail.id, actions.onPackageShareActivity)
+            } label: {
+                Label(ShellStrings.text("Share game"), systemImage: "square.and.arrow.up")
+            }
+            .disabled(resigning)
+            .accessibilityIdentifier("set.share")
+        } else if detail.canShare {
             Button { actions.onSharePackage(detail.id) } label: {
                 Label(ShellStrings.text("Share game"), systemImage: "square.and.arrow.up")
             }

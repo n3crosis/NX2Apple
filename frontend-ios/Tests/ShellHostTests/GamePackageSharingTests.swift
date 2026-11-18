@@ -2,6 +2,25 @@ import XCTest
 @testable import ShellHost
 
 final class GamePackageSharingTests: XCTestCase {
+    @MainActor func testFilePickerCancellationIsNotAnImportFailure() {
+        XCTAssertNil(GamePackageReceiveView.importFailureMessage(CocoaError(.userCancelled)))
+        XCTAssertNil(GamePackageReceiveView.importFailureMessage(URLError(.cancelled)))
+        let unreadable = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError,
+                                 userInfo: [NSLocalizedDescriptionKey: "Cannot read package"])
+        XCTAssertEqual(GamePackageReceiveView.importFailureMessage(unreadable), "Cannot read package")
+    }
+
+    func testLocalTransferWaitsForPermissionWithoutChangingRemoteTimeouts() {
+        let local = GamePackageShareClient.sessionConfiguration(remote: false)
+        XCTAssertTrue(local.waitsForConnectivity)
+        XCTAssertEqual(local.timeoutIntervalForResource, 60)
+        XCTAssertNil(local.urlCache)
+        XCTAssertNil(local.httpCookieStorage)
+        let remote = GamePackageShareClient.sessionConfiguration(remote: true)
+        XCTAssertFalse(remote.waitsForConnectivity)
+        XCTAssertEqual(remote.timeoutIntervalForResource, 60)
+    }
+
     func testSharedGenerationSurvivesOtherWindowPruningUntilLastLeaseEnds() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -18,6 +37,20 @@ final class GamePackageSharingTests: XCTestCase {
         GamePackageLibrary.releaseSharing(directory)
         try library.prune(preserving: [])
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testFileLeaseSurvivesStoppingConcurrentLink() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("0100000000001000/\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let library = GamePackageLibrary(root: root)
+        GamePackageLibrary.retainSharing(directory) // link
+        GamePackageLibrary.retainSharing(directory) // file export
+        GamePackageLibrary.releaseSharing(directory) // Stop sharing
+        defer { GamePackageLibrary.releaseSharing(directory) }
+        try library.prune(preserving: [])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
     }
 
     func testInvitationRequiresTokenAndLANAddress() throws {

@@ -297,15 +297,21 @@ public actor GamePackageShareClient {
     public init(url: URL, remote: Bool = false) throws {
         let invitation = try GamePackageShareInvitation(url: url, remote: remote)
         self.invitation = invitation
+        session = URLSession(configuration: Self.sessionConfiguration(remote: remote),
+            delegate: ShareRedirects(),
+            delegateQueue: nil)
+    }
+
+    nonisolated static func sessionConfiguration(remote: Bool) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
+        // The first local request may precede the owner's privacy-prompt response.
+        configuration.waitsForConnectivity = !remote
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 60
-        session = URLSession(configuration: configuration,
-            delegate: ShareRedirects(),
-            delegateQueue: nil)
+        return configuration
     }
 
     public func preview() async throws -> GamePackage.Preview {

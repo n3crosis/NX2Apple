@@ -3,6 +3,26 @@ import Security
 @testable import ShellHost
 
 final class ShellSigningIdentityTests: XCTestCase {
+    @MainActor func testBuilderSigningFailuresKeepTheirActualReason() {
+        let cases: [(ShellSigningIdentityStore.Failure, String)] = [
+            (.missing, hostText("No signing identity saved")),
+            (.hostSignatureUnavailable, hostText("This app's signing certificate could not be verified.")),
+            (.signerMismatch, hostText("Choose the P12 certificate used to sign this app.")),
+            (.certificateNotInProfile, hostText("The provisioning profile does not include this P12 certificate.")),
+            (.expired, hostText("The provisioning profile is expired or invalid.")),
+            (.invalid, hostText("Check the P12 password and use a profile from this app's signing team.")),
+            (.storage, hostText("Saved signing identity details unavailable")),
+            (.locked, hostText("Saved signing identity details unavailable"))
+        ]
+        for (failure, expected) in cases {
+            XCTAssertEqual(GamePackageBuildView.signingFailureMessage(failure), expected)
+            XCTAssertEqual(failure.localizedDescription, expected)
+        }
+        let other = NSError(domain: "Test", code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "Unreadable identity"])
+        XCTAssertEqual(GamePackageBuildView.signingFailureMessage(other), "Unreadable identity")
+    }
+
     @MainActor func testSigningFileExtensions() {
         XCTAssertEqual(ShellSigningIdentityView.fileExtensions(isProfile: true),
                        ["mobileprovision", "provisionprofile"])

@@ -2551,5 +2551,8 @@
   "ios.host.sharing.internet": "通过互联网分享",
   "ios.host.sharing.disclosure": "Cloudflare 可以读取传输的游戏数据。任何持有链接的人都可以下载。",
   "ios.host.sharing.remote_instructions": "在另一台设备上扫描此链接或将其粘贴到 NX2Apple。请保持此页面开启，直到传输完成。",
-  "ios.host.sharing.allow_internet": "允许互联网传输"
+  "ios.host.sharing.allow_internet": "允许互联网传输",
+  "ios.host.sharing.save_file": "保存到文件",
+  "ios.host.sharing.stop": "停止共享",
+  "ios.host.sharing.unavailable": "游戏包不可用"
 }

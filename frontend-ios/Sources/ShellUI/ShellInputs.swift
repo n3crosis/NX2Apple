@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import CoreGraphics
 
 /// The caller supplies display data. These types never load, validate, or store game data.
@@ -284,6 +285,8 @@ public struct PadSnapshot: Equatable, Sendable {
 
 /// All effects leave the package through these closures. The game ID is always explicit.
 public struct ShellActions {
+    /// Optional host-owned destination inside Game Settings navigation.
+    public var packageSharePage: (@MainActor (String, @escaping (Bool) -> Void) -> AnyView)? = nil
     public var onSelect: (String) -> Void
     public var onPlay: (String) -> Void
     public var onChange: (_ gameID: String, _ settingID: String, _ value: String) -> Void

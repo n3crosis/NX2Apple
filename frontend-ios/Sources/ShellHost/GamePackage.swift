@@ -281,13 +281,14 @@ public enum GamePackage {
         let manifest = try JSONDecoder().decode(GamePackageManifest.self, from: raw)
         try manifest.validate()
         let allowed = Set(manifest.files.map(\.path) + [GamePackageManifest.fileName, "nxb.signature.json", "original.dylib"])
-        guard let contents = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else {
+        guard let contents = FileManager.default.enumerator(atPath: directory.path) else {
             throw GamePackageError.invalid("unreadable package directory")
         }
-        for case let url as URL in contents {
+        // Relative enumeration avoids /var versus /private/var URL aliases.
+        for case let path as String in contents {
+            let url = directory.appendingPathComponent(path)
             let type = try FileManager.default.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType
             if type == .typeDirectory { continue }
-            let path = String(url.path.dropFirst(directory.path.count + 1))
             guard type == .typeRegular, allowed.contains(path) else {
                 throw GamePackageError.invalid("unlisted package file")
             }

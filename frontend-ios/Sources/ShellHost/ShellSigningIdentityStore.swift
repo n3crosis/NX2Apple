@@ -199,3 +199,18 @@ public struct ShellSigningIdentityStore: Sendable {
         try operation(p12, profile, credential.password)
     }
 }
+
+// Keep export errors specific without exposing credentials or file paths.
+extension ShellSigningIdentityStore.Failure: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .missing: return hostText("No signing identity saved")
+        case .hostSignatureUnavailable: return hostText("This app's signing certificate could not be verified.")
+        case .signerMismatch: return hostText("Choose the P12 certificate used to sign this app.")
+        case .certificateNotInProfile: return hostText("The provisioning profile does not include this P12 certificate.")
+        case .expired: return hostText("The provisioning profile is expired or invalid.")
+        case .invalid: return hostText("Check the P12 password and use a profile from this app's signing team.")
+        case .storage, .locked: return hostText("Saved signing identity details unavailable")
+        }
+    }
+}

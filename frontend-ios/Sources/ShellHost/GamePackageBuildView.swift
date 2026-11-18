@@ -156,7 +156,12 @@ struct GamePackageBuildView: View {
                     case 2: updates = urls
                     default: dlc = urls
                     }
-                } catch { failure = error.localizedDescription }
+                } catch {
+                    let error = error as NSError
+                    guard !(error.domain == NSCocoaErrorDomain && error.code == NSUserCancelledError),
+                          !(error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled) else { return }
+                    failure = error.localizedDescription
+                }
             }
         }
         .task {
@@ -214,6 +219,21 @@ struct GamePackageBuildView: View {
 
     private func refreshSigningIdentity() {
         signingSummary = signingStore.identitySummary()
+    }
+
+    static func signingFailureMessage(_ error: Error) -> String {
+        guard let failure = error as? ShellSigningIdentityStore.Failure else {
+            return error.localizedDescription
+        }
+        switch failure {
+        case .missing: return hostText("No signing identity saved")
+        case .hostSignatureUnavailable: return hostText("This app's signing certificate could not be verified.")
+        case .signerMismatch: return hostText("Choose the P12 certificate used to sign this app.")
+        case .certificateNotInProfile: return hostText("The provisioning profile does not include this P12 certificate.")
+        case .expired: return hostText("The provisioning profile is expired or invalid.")
+        case .invalid: return hostText("Check the P12 password and use a profile from this app's signing team.")
+        case .storage, .locked: return hostText("Saved signing identity details unavailable")
+        }
     }
 
     private func stageLabel(_ stage: String) -> String {
@@ -291,7 +311,7 @@ struct GamePackageBuildView: View {
                 }.value
             } catch {
                 if Task.isCancelled { throw CancellationError() }
-                failure = hostText("Check the P12 password and use a profile from this app's signing team.")
+                failure = Self.signingFailureMessage(error)
                 return
             }
             try Task.checkCancellation()

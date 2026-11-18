@@ -85,6 +85,13 @@ struct GamePackageShareView: View {
 }
 
 struct GamePackageReceiveView: View {
+    static func importFailureMessage(_ error: Error) -> String? {
+        let error = error as NSError
+        guard !(error.domain == NSCocoaErrorDomain && error.code == NSUserCancelledError),
+              !(error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled) else { return nil }
+        return error.localizedDescription
+    }
+
     let model: ShellHostModel
     let close: () -> Void
     @Environment(\.scenePhase) private var scenePhase
@@ -143,7 +150,8 @@ struct GamePackageReceiveView: View {
             case .success(let url):
                 model.enqueueExternalPackage(url)
                 close()
-            case .failure(let failure): error = failure.localizedDescription
+            case .failure(let failure):
+                if let message = Self.importFailureMessage(failure) { error = message }
             }
         }
         .onChange(of: link) { _, _ in allowInternet = false }

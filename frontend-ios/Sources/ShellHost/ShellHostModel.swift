@@ -138,13 +138,14 @@ private struct CertificateFileVersion: Equatable {
     public private(set) var details: [GameDetail] = []
     public private(set) var entries: [CatalogueEntry] = []
     public private(set) var packages: [GamePackageLibrary.Entry] = []
+    var innerSharingPackage: GamePackageLibrary.Entry?
     public var sharingPackage: GamePackageLibrary.Entry?
     public var packagePreview: GamePackageLibrary.Prepared?
     public private(set) var importingPackage = false
     @ObservationIgnored private var externalPackages: [(url: URL, scoped: Bool)] = []
     public private(set) var hasExternalPackage = false
     var canPreparePackage: Bool {
-        !importingPackage && packagePreview == nil && sharingPackage == nil && !isGameRunning && !launchingGame && !resigningGame &&
+        !importingPackage && packagePreview == nil && sharingPackage == nil && innerSharingPackage == nil && !isGameRunning && !launchingGame && !resigningGame &&
             !importingSigningIdentity && cloudConflict == nil && log == nil && notice == nil
     }
     @ObservationIgnored private let packageLauncher: (any GamePackageLauncher)?
@@ -555,7 +556,7 @@ private struct CertificateFileVersion: Equatable {
     private func reload(afterClaim: Bool) {
         guard !resigningGame else { return }
         // Imports and completed re-signs reload the catalogue, including replacements at the same path.
-        try? packageLibrary.prune(preserving: GamePackageSession.loadedDirectories.union(sharingPackage.map { [$0.directory] } ?? []))
+        try? packageLibrary.prune(preserving: GamePackageSession.loadedDirectories.union(sharingPackage.map { [$0.directory] } ?? []).union(innerSharingPackage.map { [$0.directory] } ?? []))
         packages = packageLibrary.entries()
         certificateExpirations.removeAll(keepingCapacity: true)
         forgetCheckedRomfsImages()
@@ -1886,9 +1887,16 @@ extension ShellHostModel {
         return min(profile, certificate)
     }
 
-    private func signPackageForSharing(_ id: String) async throws -> URL? {
+    func signPackageForSharing(_ id: String) async throws -> URL? {
         guard id.hasPrefix("nxb:"), let entry = packages.first(where: { "nxb:" + $0.id == id }) else { return nil }
+        return try await signPackageForSharing(entry)
+    }
+
+    func signPackageForSharing(_ entry: GamePackageLibrary.Entry) async throws -> URL {
+        // File export owns a lease independently of any active link server.
+        GamePackageLibrary.retainSharing(entry.directory)
         let export = Task.detached(priority: .userInitiated) {
+            defer { GamePackageLibrary.releaseSharing(entry.directory) }
             try Task.checkCancellation()
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1907,8 +1915,8 @@ extension ShellHostModel {
                 return output
             } catch {
                 try? FileManager.default.removeItem(at: directory)
-                if error is ShellSigningIdentityStore.Failure {
-                    throw GamePackageError.invalid(hostText("Check your signing identity in Settings and unlock this device, then try again. The installed game was not changed."))
+                if let failure = error as? ShellSigningIdentityStore.Failure {
+                    throw GamePackageError.invalid(failure.localizedDescription)
                 }
                 throw error
             }

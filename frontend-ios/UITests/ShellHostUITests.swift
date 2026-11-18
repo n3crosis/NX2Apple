@@ -29,7 +29,9 @@ import XCTest
             let consent = app.switches["sharing.allowInternet"]
             XCTAssertTrue(consent.waitForExistence(timeout: 5))
             XCTAssertFalse(app.buttons["Receive game"].isEnabled)
-            consent.tap()
+            consent.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: app.buttons["Receive game"])
+            XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
             XCTAssertTrue(app.buttons["Receive game"].isEnabled)
             app.navigationBars["Import prebuilt games"].buttons["Cancel"].tap()
             XCTAssertTrue(open.waitForExistence(timeout: 5))

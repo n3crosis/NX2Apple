@@ -21,6 +21,20 @@ public struct ShellHostView: View {
         self.initialDetailOpen = initialDetailOpen
     }
 
+    private var pageActions: ShellActions {
+        var actions = model.actions
+        actions.packageSharePage = { id, activity in
+            if let entry = model.packages.first(where: { "nxb:" + $0.id == id }) {
+                return AnyView(GamePackageSharePage(entry: entry, gameTunnel: gameTunnel,
+                    export: { try await model.signPackageForSharing(entry) },
+                    onOpen: { model.innerSharingPackage = entry; activity(true) },
+                    onClose: { model.innerSharingPackage = nil; activity(false) }))
+            }
+            return AnyView(Text(hostText("Game package unavailable")))
+        }
+        return actions
+    }
+
     private var libraryInputEnabled: Bool {
         !receiverPresented && model.sharingPackage == nil && !buildingPackage && model.canPreparePackage
     }
@@ -33,7 +47,7 @@ public struct ShellHostView: View {
                 Color.black.ignoresSafeArea()
                     .accessibilityIdentifier("deeplink.launching")
             } else {
-                LibraryView(games: model.libraryDetails, controllers: model.controllers, actions: model.actions, input: model.input,
+                LibraryView(games: model.libraryDetails, controllers: model.controllers, actions: pageActions, input: model.input,
                             initialSelection: initialSelection, initialDetailOpen: initialDetailOpen, globalPadMap: model.globalPadMap,
                             padMerge: model.padMerge, padSnapshot: model.padSnapshot,
                             signingWarning: model.signingWarning,
