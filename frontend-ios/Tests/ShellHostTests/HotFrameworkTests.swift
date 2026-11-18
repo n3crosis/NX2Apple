@@ -1,6 +1,31 @@
 import Foundation
+import ShellUI
 import Testing
 @testable import ShellHost
+
+private final class CertificateExpirationReader: @unchecked Sendable {
+    private let lock = NSLock()
+    private var expiration: Date?
+    private var reads = 0
+
+    init(_ expiration: Date?) { self.expiration = expiration }
+    func read(_ executable: URL) -> Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        reads += 1
+        return expiration
+    }
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return reads
+    }
+    func set(_ expiration: Date?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.expiration = expiration
+    }
+}
 
 @MainActor @Suite struct HotFrameworkTests {
     private let secondTitleID = "01007EF00011E000"
@@ -122,6 +147,148 @@ import Testing
         #expect(!fm.fileExists(atPath: hotOrbit.path), "redundant hot framework is reclaimed once the app bundle carries the build")
     }
 
+    @Test func resignControlIsOfferedOnlyForImportedGame() async throws {
+        let box = try Sandbox()
+        let bundled = ShellHostModel(config: box.config())
+        #expect(bundled.details.allSatisfy { !$0.canResign })
+        await bundled.resignGame(Fixtures.orbit)
+        #expect(bundled.notice == nil)
+        bundled.showSigningResult()
+        #expect(bundled.notice != nil)
+        #expect(!bundled.resigningGame)
+        var cfg = box.config()
+        cfg.hotFrameworksRoot = box.root.appendingPathComponent("Documents/Frameworks")
+        _ = try writeFramework(in: cfg.hotFrameworksRoot!, builtAt: "2026-11-12T10:00:00Z")
+        let model = ShellHostModel(config: cfg)
+        #expect(model.details.first { $0.id == Fixtures.orbit }?.canResign == true)
+    }
+
+    @Test(arguments: [false, true]) func certificateDatesAreCachedUntilCatalogueOrSigningReload(readable: Bool) async throws {
+        let box = try Sandbox()
+        var cfg = box.config()
+        cfg.hotFrameworksRoot = box.root.appendingPathComponent("Documents/Frameworks")
+        _ = try writeFramework(in: cfg.hotFrameworksRoot!, builtAt: "2026-11-12T10:00:00Z")
+        _ = try writeFramework(in: cfg.hotFrameworksRoot!, titleID: secondTitleID)
+        let certificate = Date(timeIntervalSince1970: 1_900_000_000)
+        let profile = certificate.addingTimeInterval(86_400)
+        let reader = CertificateExpirationReader(readable ? certificate : nil)
+        cfg.certificateExpiration = { reader.read($0) }
+        cfg.provisioningExpiration = { profile }
+        let settings = ShellSettingsStore(defaults: UserDefaults(suiteName: "expiry-\(UUID().uuidString)")!)
+        let model = ShellHostModel(config: cfg, shellSettings: settings)
+        await model.waitForStartupTasks()
+        #expect(model.details.filter(\.canResign).count == 2)
+        #expect(reader.count == 2, "Read each imported executable only once")
+        #expect(model.details.filter(\.canResign).allSatisfy { $0.signingExpiration == (readable ? certificate : nil) })
+
+        for _ in 0..<3 {
+            model.change(Fixtures.orbit, setting: "DM_SHOW_FPS", value: "1")
+            let changed = try #require(model.details.first { $0.id == Fixtures.orbit })
+            #expect(changed.sections.flatMap(\.rows).first { $0.id == "DM_SHOW_FPS" }?.value == "1")
+            #expect(changed.hasModifiedSettings && changed.canResign)
+            #expect(changed.signingExpiration == (readable ? certificate : nil))
+            #expect(reader.count == 2, "In-memory settings changes do not read signatures")
+
+            model.resetDefaults(Fixtures.orbit)
+            let reset = try #require(model.details.first { $0.id == Fixtures.orbit })
+            #expect(reset.sections.flatMap(\.rows).first { $0.id == "DM_SHOW_FPS" }?.value == "0")
+            #expect(!reset.hasModifiedSettings && reset.canResign)
+            #expect(reset.signingExpiration == (readable ? certificate : nil))
+            #expect(reader.count == 2, "Reset preserves signing metadata without a signature read")
+            model.setPadMerge(true)
+            model.refreshAll()
+        }
+        #expect(reader.count == 2, "Settings and detail refreshes reuse dates, including unreadable signatures")
+
+        // An import may replace the executable without changing its path.
+        reader.set(profile.addingTimeInterval(86_400))
+        model.reload()
+        #expect(reader.count == 4)
+        #expect(model.details.filter(\.canResign).allSatisfy { $0.signingExpiration == profile },
+                "Refreshed certificate dates remain capped by the host profile")
+
+        // This is the same reload path used after re-signing finishes in any window.
+        let session = GameSigningSession()
+        session.register(model)
+        reader.set(nil)
+        session.reload()
+        #expect(reader.count == 6)
+        #expect(model.details.filter(\.canResign).allSatisfy { $0.signingExpiration == nil })
+    }
+
+    @Test(arguments: [false, true]) func promotedExecutableInvalidatesExpiryInEveryWindow(readable: Bool) async throws {
+        let box = try Sandbox()
+        let fm = FileManager.default
+        let hotRoot = box.root.appendingPathComponent("Documents/Frameworks")
+        let framework = try writeFramework(in: hotRoot, builtAt: "2026-11-12T10:00:00Z")
+        let executable = framework.appendingPathComponent("DmGame\(Fixtures.orbit)")
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        try fm.setAttributes([.modificationDate: timestamp], ofItemAtPath: executable.path)
+        let oldAttributes = try fm.attributesOfItem(atPath: executable.path)
+        let certificate = Date(timeIntervalSince1970: 1_900_000_000)
+        let profile = certificate.addingTimeInterval(86_400)
+        let readers = [CertificateExpirationReader(readable ? certificate : nil),
+                       CertificateExpirationReader(readable ? certificate : nil)]
+        var models: [ShellHostModel] = []
+        for reader in readers {
+            var cfg = box.config()
+            cfg.hotFrameworksRoot = hotRoot
+            cfg.certificateExpiration = { reader.read($0) }
+            cfg.provisioningExpiration = { profile }
+            let model = ShellHostModel(config: cfg)
+            await model.waitForStartupTasks()
+            models.append(model)
+            #expect(reader.count == 1)
+            #expect(model.details.first { $0.id == Fixtures.orbit }?.signingExpiration == (readable ? certificate : nil))
+        }
+
+        // A detached catalogue scan can promote without a model reload when no loose data was claimed.
+        // Use the real promotion path and preserve size/mtime so only file identity detects the replacement.
+        let staging = hotRoot.appendingPathComponent(".staging-\(Fixtures.orbit)-expiry")
+        let staged = try writeFramework(in: staging, builtAt: "2026-11-12T10:00:00Z", executableBytes: "other-placeholder")
+        try fm.setAttributes([.modificationDate: timestamp], ofItemAtPath: staged.appendingPathComponent(executable.lastPathComponent).path)
+        let footprint = try #require(GameCatalogue.frameworkFootprint(at: staged))
+        try JSONEncoder().encode(HotFrameworkReady(titleID: Fixtures.orbit, files: footprint.files, bytes: footprint.bytes))
+            .write(to: staging.appendingPathComponent(".ready"))
+        GameCatalogue.promoteStagedFrameworks(in: hotRoot, gameDataRoot: box.config().appDataRoot)
+        let newAttributes = try fm.attributesOfItem(atPath: executable.path)
+        #expect(newAttributes[.size] as? NSNumber == oldAttributes[.size] as? NSNumber)
+        #expect(newAttributes[.modificationDate] as? Date == oldAttributes[.modificationDate] as? Date)
+        #expect(newAttributes[.systemFileNumber] as? NSNumber != oldAttributes[.systemFileNumber] as? NSNumber)
+        #expect(!fm.fileExists(atPath: staging.path))
+
+        for (model, reader) in zip(models, readers) {
+            reader.set(profile.addingTimeInterval(86_400))
+            for _ in 0..<3 { model.refreshAll() }
+            #expect(reader.count == 2, "Each window re-reads a promoted executable once without needing reload")
+            #expect(model.details.first { $0.id == Fixtures.orbit }?.signingExpiration == profile)
+        }
+
+        // A failed metadata read must not return the previous file's cached date.
+        try fm.removeItem(at: executable)
+        for (model, reader) in zip(models, readers) {
+            reader.set(nil)
+            model.refreshAll()
+            #expect(reader.count == 3)
+            #expect(model.details.first { $0.id == Fixtures.orbit }?.signingExpiration == nil)
+        }
+    }
+
+    @Test func unknownHostExpiryDoesNotReadImportedSignatures() async throws {
+        let box = try Sandbox()
+        var cfg = box.config()
+        cfg.hotFrameworksRoot = box.root.appendingPathComponent("Documents/Frameworks")
+        _ = try writeFramework(in: cfg.hotFrameworksRoot!)
+        let reader = CertificateExpirationReader(Date())
+        cfg.certificateExpiration = { reader.read($0) }
+        cfg.provisioningExpiration = { nil }
+        let model = ShellHostModel(config: cfg)
+        await model.waitForStartupTasks()
+        model.refreshAll()
+        #expect(model.details.contains { $0.canResign })
+        #expect(reader.count == 0, "A certificate date cannot supply an expiry without the host profile")
+    }
+
     @Test func deletingHotOverriddenGameRemovesHotFrameworkAndSuppressesOlderBundledCopy() throws {
         let box = try Sandbox()
         let hotRoot = box.root.appendingPathComponent("Documents/Frameworks", isDirectory: true)
@@ -140,14 +307,20 @@ import Testing
         #expect(!ShellHostModel(config: cfg).details.contains { $0.id == Fixtures.orbit }, "stays deleted across relaunch")
     }
 
-    @Test func frameworkSignatureInspectsRealMachOBinariesAndEnforcesTeamMatch() throws {
+    @Test func bundledFrameworkBypassesExternalSignaturePreflight() throws {
         let box = try FrameworkBox()
         let appBundle = box.root.appendingPathComponent("DmShell.app", isDirectory: true)
         let bundledExe = appBundle.appendingPathComponent("Frameworks/DmGame.framework/DmGame")
         try box.write("bundled", to: bundledExe)
         #expect(FrameworkSignature.preflightExternal(executable: bundledExe, appBundleURL: appBundle, hostTeamID: "TEAM123456") == nil,
                 "frameworks inside DmShell.app bypass external preflight")
+    }
 
+    #if os(macOS)
+    // Building and stripping a real Mach-O requires host tools unavailable on iOS.
+    @Test func frameworkSignatureInspectsRealMachOBinariesAndEnforcesTeamMatch() throws {
+        let box = try FrameworkBox()
+        let appBundle = box.root.appendingPathComponent("DmShell.app", isDirectory: true)
         let src = box.root.appendingPathComponent("tiny.c")
         let dylib = box.root.appendingPathComponent("Documents/Frameworks/DmGame.framework/DmGame")
         try FileManager.default.createDirectory(at: dylib.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -185,6 +358,8 @@ import Testing
         #expect(!strippedInfo.hasCodeSignature)
         #expect(FrameworkSignature.preflightExternal(executable: dylib, appBundleURL: appBundle, hostTeamID: nil)?.contains("unsigned") == true)
     }
+
+    #endif
 
     @Test func reinstallingLegacyBundledFrameworkWithoutBuiltAtDiscardsOlderHotCopy() throws {
         let box = try FrameworkBox()

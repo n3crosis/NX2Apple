@@ -40,6 +40,11 @@ public struct LibraryView: View {
     /// The controller's state while the button test is open, from the host.
     public let padSnapshot: PadSnapshot?
     public let signingWarning: SigningWarning?
+    public let inputEnabled: Bool
+    public let signingIdentityContent: AnyView?
+    @Binding public var signingIdentityPresented: Bool
+    /// Team that signed the installed app, supplied by the host without reading imported credentials.
+    public let signingTeamID: String?
     public let canOpenHomeButtonSettings: Bool
     public var onDismissSigningWarning: () -> Void
     public var actions: ShellActions
@@ -81,6 +86,7 @@ public struct LibraryView: View {
     @State var layout: ShellLayout = .column
     @State var divisionAxis: Axis?
     var horizontalDivision: Bool { divisionAxis == .horizontal }
+    @State var resigningGameID: String?
     @State var pendingMenuAction: (() -> Void)?
     @State var retention = PanelRetention()   // a closed panel stays drawn while the sheet slides out (#664)
     @State var returnFocus: String?
@@ -97,7 +103,8 @@ public struct LibraryView: View {
                 initialControllersOpen: Bool = false, initialShellSettingsOpen: Bool = false, initialFocusVisible: Bool = false,
                 globalPadMap: PadMap = PadMap(), padMerge: Bool = false, padSnapshot: PadSnapshot? = nil,
                 signingWarning: SigningWarning? = nil, onDismissSigningWarning: @escaping () -> Void = {},
-                initialPadMapping: String? = nil, initialButtonTestOpen: Bool = false,
+                initialPadMapping: String? = nil, initialButtonTestOpen: Bool = false, signingTeamID: String? = nil, inputEnabled: Bool = true,
+                signingIdentityPresented: Binding<Bool> = .constant(false), signingIdentityContent: AnyView? = nil,
                 canOpenHomeButtonSettings: Bool = false) {
         ShellPalette.configureNativeAppearance()
         self.games = games
@@ -106,6 +113,10 @@ public struct LibraryView: View {
         self.padMerge = padMerge
         self.padSnapshot = padSnapshot
         self.signingWarning = signingWarning
+        self.inputEnabled = inputEnabled
+        self.signingIdentityContent = signingIdentityContent
+        _signingIdentityPresented = signingIdentityPresented
+        self.signingTeamID = signingTeamID
         self.canOpenHomeButtonSettings = canOpenHomeButtonSettings
         self.onDismissSigningWarning = onDismissSigningWarning
         _padMapping = State(initialValue: initialPadMapping.map { PadMappingState(gameID: $0) })
@@ -190,9 +201,9 @@ public struct LibraryView: View {
                     .presentationDragIndicator(.visible)
                     .presentationBackground(ShellPalette.background)
                     .presentationContentInteraction(touchLayout != nil ? .scrolls : .automatic)
-                    .interactiveDismissDisabled(touchLayout != nil)
+                    .interactiveDismissDisabled(touchLayout != nil || resigningGameID != nil)
                     .modifier(MenuPlacement(divided: divisionAxis == .vertical, secondary: controllersOpen || shellSettingsOpen))
-                    .modifier(ShellKeyboardNavigation(active: touchLayout == nil && padMapping?.row == nil) { handle($0, from: .keyboard) })
+                    .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil && touchLayout == nil && padMapping?.row == nil) { handle($0, from: .keyboard) })
             }
 
             .environment(\.shellOpenTouchLayout, { openTouchLayout(whole, insets) })
@@ -242,8 +253,23 @@ public struct LibraryView: View {
             }
             inputSeen = log.last
         }
+        .onChange(of: signingIdentityPresented, initial: true) { _, presented in
+            if presented {
+                retention.reset()
+                shellSettingsOpen = true
+                controllersOpen = false
+                choice = nil
+                padMapping = nil
+                helpGameID = nil
+                restoreBackupGameID = nil
+                deleteGameID = nil
+                focus.visible = false
+            } else if shellSettingsOpen {
+                focus.id = "shs.signing"
+            }
+        }
         .onAnyTouch { gate.touch() }
-        .modifier(ShellKeyboardNavigation(active: !menuPresented) { handle($0, from: .keyboard) })
+        .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil && !menuPresented) { handle($0, from: .keyboard) })
         .onAppear { focusRefresh &+= 1 }
         .onDisappear { targets.values.removeAll(); targets.libraryValues.removeAll() }
         .onChange(of: settingsOpen) { _, open in
@@ -267,7 +293,7 @@ public struct LibraryView: View {
     }
 
     var menuPresented: Bool {
-        touchLayout != nil || settingsOpen || controllersOpen || shellSettingsOpen || helpGameID != nil
+        signingIdentityPresented || touchLayout != nil || settingsOpen || controllersOpen || shellSettingsOpen || helpGameID != nil
             || restoreBackupGameID != nil || homeScreenGameID != nil || deleteGameID != nil || choice != nil || padMapping != nil || buttonTestOpen
     }
 
@@ -277,7 +303,19 @@ public struct LibraryView: View {
         routed.onPlay = { id in handOffMenu { actions.onPlay(id) } }
         routed.onShowLog = { id in handOffMenu { actions.onShowLog(id) } }
         routed.onAppUpdate = { handOffMenu { actions.onAppUpdate() } }
+        routed.onImportSigningIdentity = {
+            guard !fromSystemEcho else { return }
+            actions.onImportSigningIdentity()
+        }
         routed.onRestoreSaveBackup = { id in handOffMenu { actions.onRestoreSaveBackup(id) } }
+        routed.onResignGame = { id in
+            guard pendingMenuAction == nil, resigningGameID == nil,
+                  games.contains(where: { $0.id == id && $0.canResign }) else { return }
+            resigningGameID = id
+            await actions.onResignGame(id)
+            resigningGameID = nil
+            handOffMenu { actions.onShowSigningResult() }
+        }
         return routed
     }
 
@@ -294,6 +332,7 @@ public struct LibraryView: View {
     }
 
     func dismissMenus() {
+        signingIdentityPresented = false
         closeTouchLayout()
         if buttonTestOpen { closeButtonTest() }
         choice = nil
@@ -312,8 +351,11 @@ public struct LibraryView: View {
 
     var menuSheet: some View {
         NavigationStack {
-            menuContent.toolbar { if touchLayout == nil { launcherToolbar } }
+            menuContent.toolbar { if touchLayout == nil && !signingIdentityPresented && resigningGameID == nil { launcherToolbar } }
                 .accessibilityHidden(touchLayout != nil)
+                .navigationDestination(isPresented: $signingIdentityPresented) {
+                    if let signingIdentityContent { signingIdentityContent }
+                }
                 .navigationDestination(isPresented: Binding(get: { padMapping != nil }, set: { if !$0 { closePadMapping() } })) {
                     if let mapping = padMapping {
                         PadMappingCard(title: padMappingTitle(mapping.gameID), rows: padMappingRows(mapping.gameID),
@@ -365,7 +407,7 @@ public struct LibraryView: View {
             .tint(ShellPalette.cream)
             .preferredColorScheme(.dark)
             .interactiveDismissDisabled()
-            .modifier(ShellKeyboardNavigation(active: true) { handle($0, from: .keyboard) })
+            .modifier(ShellKeyboardNavigation(active: inputEnabled && !signingIdentityPresented && resigningGameID == nil) { handle($0, from: .keyboard) })
     }
 
     var menuContent: some View {
@@ -385,7 +427,7 @@ public struct LibraryView: View {
                         .allowsHitTesting(!retention.isLeaving(.controllers, open: controllersOpen))
                 }
                 if retention.draws(.shellSettings, open: shellSettingsOpen) {
-                    ShellSettingsView(actions: menuActions, onClose: closeShellSettings)
+                    ShellSettingsView(actions: menuActions, onClose: closeShellSettings, signingTeamID: signingTeamID)
                         .background(ShellPalette.background)
                         .accessibilityHidden(choice != nil || retention.isLeaving(.shellSettings, open: shellSettingsOpen))
                         .allowsHitTesting(!retention.isLeaving(.shellSettings, open: shellSettingsOpen))
@@ -428,6 +470,7 @@ public struct LibraryView: View {
             }
 
         }
+        .disabled(resigningGameID != nil)
         .navigationTitle(menuTitle)
         .navigationSubtitle(tabletopSettings ? ShellStrings.text("Game settings").uppercased() : "")
         #if os(iOS)

@@ -808,8 +808,18 @@ import XCTest
     func testGameActionMorphKeepsOnePrimaryAcrossReadinessStates() {
         launch("library")
         for (id, label, playable) in [("paper", "Choose game data", false), ("moon", "How to update", false), ("orbit", "Play", true)] {
-            if playable { app.scrollViews["library.grid"].swipeDown() }
             let tile = app.buttons["tile." + id]
+            // Selection scrolls the horizontal cover row. A vertical swipe cannot reveal an earlier cover.
+            let covers = app.scrollViews["library.grid"].scrollViews.firstMatch
+            XCTAssertTrue(covers.exists)
+            for _ in 0..<8 {
+                // XCTest can fail the hittability query itself for a fully offscreen tile.
+                if covers.frame.contains(tile.frame) && tile.isHittable { break }
+                if tile.frame.midX < covers.frame.midX { covers.swipeRight() }
+                else { covers.swipeLeft() }
+            }
+            XCTAssertTrue(covers.frame.contains(tile.frame))
+            XCTAssertTrue(tile.isHittable)
             tile.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
             expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: tile)
             expectation(for: NSPredicate(format: "exists == %@", NSNumber(value: playable)), evaluatedWith: app.buttons["settings.open"])

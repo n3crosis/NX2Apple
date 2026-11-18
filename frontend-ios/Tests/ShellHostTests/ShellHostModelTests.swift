@@ -36,6 +36,18 @@ final class Clock: @unchecked Sendable { var date: Date; init(_ d: Date) { date 
         try detail(model, game).sections.flatMap(\.rows).first { $0.id == setting }?.value
     }
 
+    @Test func settingsActionOpensAndCanDismissTheSigningImporter() throws {
+        let box = try Sandbox()
+        let model = ShellHostModel(config: box.config(), shellSettings: shellSettings())
+        #expect(!model.importingSigningIdentity)
+        model.actions.onImportSigningIdentity()
+        #expect(model.importingSigningIdentity)
+        model.importingSigningIdentity = false
+        #expect(!model.importingSigningIdentity)
+        model.actions.onImportSigningIdentity()
+        #expect(model.importingSigningIdentity)
+    }
+
     @Test func theTouchSizeReachesEveryGameAsDMTouchSize() async throws {
         let box = try Sandbox()
         try box.giveAppData()
@@ -711,8 +723,11 @@ final class Clock: @unchecked Sendable { var date: Date; init(_ d: Date) { date 
         let box = try Sandbox()
         try box.giveAppData()
         let model = ShellHostModel(config: box.config(), launcher: StubGameLauncher(log: { _ in }))
+        let session = GameSigningSession()
+        session.register(model)
         await model.playNow(Fixtures.orbit)
         #expect(model.notice == "Launching is not available yet.")
+        #expect(!model.isGameRunning && !session.hasPendingLaunch)
     }
 
     @Test func playIgnoresGamesThatCannotStart() async throws {

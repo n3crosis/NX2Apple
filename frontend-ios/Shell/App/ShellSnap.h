@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <time.h>
+#include "ShellEngine.h"
 
 // Derives a per-game snapshot key so different game frameworks sharing a generic image marker
 // never trigger false "updated while the app was open" errors when switching games.
@@ -41,4 +42,26 @@ static inline int dm_snap_conflicts(const char *snap_key, const char *snap_exe, 
     const char *a = snap_exe ? snap_exe : "";
     const char *b = req_exe ? req_exe : "";
     return (strcmp(a, b) != 0 || snap_mtime != req_mtime) ? 1 : 0;
+}
+
+static inline int dm_snap_file_identity_matches(DmShellFileIdentity a, DmShellFileIdentity b) {
+    return a.device == b.device && a.inode == b.inode && a.size == b.size &&
+        a.modification_seconds == b.modification_seconds &&
+        a.modification_nanoseconds == b.modification_nanoseconds &&
+        a.change_seconds == b.change_seconds && a.change_nanoseconds == b.change_nanoseconds;
+}
+
+// Advance only this image's existing snapshot. An already conflicting update
+// remains blocked by the existing path/mtime guard.
+static inline int dm_snap_acknowledge_resign(const char *snap_key, const char *snap_exe, time_t *snap_mtime,
+                                            const char *game_id, const char *executable,
+                                            int64_t previous_mtime, int64_t replacement_mtime) {
+    if (!snap_key || !*snap_key || !snap_exe || !*snap_exe || !snap_mtime ||
+        !game_id || !*game_id || !executable || !*executable) return 0;
+    if (strcmp(snap_key, game_id) != 0 || strcmp(snap_exe, executable) != 0 ||
+        (int64_t)*snap_mtime != previous_mtime) return 0;
+    time_t replacement = (time_t)replacement_mtime;
+    if ((int64_t)replacement != replacement_mtime) return 0;
+    *snap_mtime = replacement;
+    return 1;
 }

@@ -12,6 +12,33 @@ import XCTest
         XCTAssertTrue(app.buttons["tile.\(id)"].waitForExistence(timeout: 10))
     }
 
+    func testSigningIdentityBackReturnsToSettings() {
+        launch(select: "0100000000010000")
+        app.buttons["shellSettings.open"].tap()
+        let signing = app.buttons["shellSettings.signing"]
+        XCTAssertTrue(signing.waitForExistence(timeout: 5))
+        if !signing.isHittable { app.swipeUp() }
+        signing.tap()
+        XCTAssertTrue(app.buttons["signing.chooseP12"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["signing.chooseProfile"].exists)
+        XCTAssertTrue(app.secureTextFields["signing.password"].exists)
+        XCTAssertFalse(app.buttons["signing.save"].isEnabled)
+        let back = app.navigationBars["Signing identity"].buttons["BackButton"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
+        XCTAssertTrue(app.buttons["shellSettings.signing"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["signing.chooseP12"].exists)
+    }
+
+    func testBundledGameSettingsDoNotOfferResigning() {
+        launch(select: "0100000000010000")
+        XCTAssertFalse(app.buttons["signing.open"].exists)
+        app.buttons["settings.open"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["settings.scroll"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["set.resign"].exists)
+        XCTAssertFalse(app.buttons["signing.chooseP12"].exists)
+    }
+
     func testPlayableFixtureSaysLaunchingIsNotAvailable() {
         launch(select: "0100000000010000")
         XCTAssertEqual(app.staticTexts["hero.title"].label, "Orbit Fixture")
@@ -26,19 +53,18 @@ import XCTest
     func testBrokenFixtureShowsItsReason() {
         launch(select: "0100000000040000")
         XCTAssertEqual(app.staticTexts["hero.title"].label, "No Framework Fixture")
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'Game code missing'")).firstMatch.waitForExistence(timeout: 5))
-        // The hero says what to do, not the parser's message.
-        XCTAssertTrue(app.staticTexts["The game's code is missing from this app. Rebuild and reinstall it."].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Fix Game Files")).firstMatch.exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'DmGame.framework'")).firstMatch.exists)
+        openRecoveryHelp()
+        XCTAssertTrue(app.staticTexts["The game's code is missing from this app. Rebuild and reinstall it."].waitForExistence(timeout: 5))
     }
 
     func testBadSettingsShowsASentenceAndKeepsTheRawMessageInDetails() {
         launch(select: "0100000000070000")
-        XCTAssertTrue(app.staticTexts["This game's settings list is damaged. Rebuild the game in the launcher on your Mac."].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Fix Game Files")).firstMatch.exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'DM_X'")).firstMatch.exists)
-        let fix = app.buttons.matching(identifier: "state.action").allElementsBoundByIndex.first { $0.isHittable }
-        fix?.tap()
-        XCTAssertTrue(app.staticTexts["help.title"].waitForExistence(timeout: 5))
+        openRecoveryHelp()
+        XCTAssertTrue(app.staticTexts["This game's settings list is damaged. Rebuild the game in the launcher on your Mac."].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["DM_X is a choice without [value, label] options."].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Details"].exists)
     }
@@ -47,12 +73,18 @@ import XCTest
         launch(select: "0100000000050000")
         XCTAssertEqual(app.staticTexts["hero.title"].label, "Unknown game")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS '0100000000050000'")).firstMatch.exists)
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] \"Can't read this game\"")).firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["This game's manifest is damaged. Rebuild the game in the launcher on your Mac."].exists)
-        let fix = app.buttons.matching(identifier: "state.action").allElementsBoundByIndex.first { $0.isHittable }
-        fix?.tap()
-        XCTAssertTrue(app.staticTexts["help.title"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Fix Game Files")).firstMatch.exists)
+        openRecoveryHelp()
+        XCTAssertTrue(app.staticTexts["This game's manifest is damaged. Rebuild the game in the launcher on your Mac."].waitForExistence(timeout: 5))
         XCTAssertEqual(app.staticTexts["help.titleid"].label, "Title ID 0100000000050000")
+    }
+
+    private func openRecoveryHelp() {
+        let fix = app.buttons["state.action"]
+        XCTAssertTrue(fix.waitForExistence(timeout: 5))
+        XCTAssertTrue(fix.isHittable)
+        fix.tap()
+        XCTAssertTrue(app.staticTexts["help.title"].waitForExistence(timeout: 5))
     }
 
     func testLibraryStartsOnAPlayableGameWithoutAVersionLineOnTheCover() {
@@ -69,10 +101,20 @@ import XCTest
     func testSettingChangeSurvivesReopeningSettings() {
         launch(select: "0100000000010000")
         let settings = app.buttons["settings.open"]
-        if settings.exists { settings.tap() }
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
         let frameRate = app.switches["setting.DM_SHOW_FPS"]
         XCTAssertTrue(frameRate.waitForExistence(timeout: 5))
-        frameRate.tap()
+        XCTAssertEqual(frameRate.value as? String, "0")
+        // The accessibility switch spans the row, while the native UISwitch is at its trailing edge.
+        frameRate.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        let enabled = NSPredicate(format: "value == %@", "1")
+        expectation(for: enabled, evaluatedWith: frameRate)
+        waitForExpectations(timeout: 5)
+        app.buttons["library.back"].tap()
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
+        XCTAssertTrue(frameRate.waitForExistence(timeout: 5))
         XCTAssertEqual(frameRate.value as? String, "1")
     }
 

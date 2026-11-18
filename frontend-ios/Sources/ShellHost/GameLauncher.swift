@@ -41,7 +41,16 @@ public struct LaunchableGame: Equatable, Sendable {
 /// It returns when the game has started (or never, if the process becomes the game), and throws a localized error the
 /// shell shows.
 public protocol GameLauncher: Sendable {
+    /// True throughout native gameplay and return-to-library teardown.
+    @MainActor var isGameRunning: Bool { get }
     @MainActor func launch(_ game: LaunchableGame) async throws
+    /// Acknowledge a verified signature-only replacement while signing still reserves the process.
+    @MainActor func didResignGame(_ receipt: GameResigningReceipt)
+}
+
+extension GameLauncher {
+    @MainActor public var isGameRunning: Bool { false }
+    @MainActor public func didResignGame(_ receipt: GameResigningReceipt) {}
 }
 
 public enum GameLaunchError: LocalizedError, Equatable, Sendable {

@@ -10,11 +10,21 @@ import UIKit
 import ShellHost
 import ShellUI
 
-/// The real launcher: one game per process. The process becomes the game, so `launch` returns only on a failure to start.
+/// The real launcher returns after presenting the game. Native state stays busy until return-to-library completes.
 struct EngineGameLauncher: GameLauncher {
     enum Failure: LocalizedError {
         case engine(String)
         var errorDescription: String? { if case .engine(let text) = self { return text }; return nil }
+    }
+
+    @MainActor var isGameRunning: Bool { dm_shell_is_game_running() != 0 }
+
+    @MainActor func didResignGame(_ receipt: GameResigningReceipt) {
+        let file = receipt.installedFile
+        let identity = DmShellFileIdentity(device: file.device, inode: file.inode, size: file.size,
+            modification_seconds: file.modificationSeconds, modification_nanoseconds: file.modificationNanoseconds,
+            change_seconds: file.changeSeconds, change_nanoseconds: file.changeNanoseconds)
+        dm_shell_did_resign_game(receipt.titleID, receipt.executable.path, receipt.previousModificationSeconds, identity)
     }
 
     @MainActor func launch(_ game: LaunchableGame) async throws {

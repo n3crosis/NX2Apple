@@ -50,6 +50,31 @@ static DmFwSnap g_fw_snaps[64];
 static int g_nfw_snaps;
 static int g_boot_ok;
 
+// These entry points share the main-thread ownership of the snapshot table.
+int dm_shell_is_game_running(void) { return g_boot_ok; }
+
+void dm_shell_did_resign_game(const char *game_id, const char *executable,
+                             int64_t previous_modification_seconds, DmShellFileIdentity expected) {
+    if (![NSThread isMainThread] || g_boot_ok || !game_id || !*game_id ||
+        !executable || !*executable) return;
+    struct stat st;
+    if (lstat(executable, &st) != 0 || !S_ISREG(st.st_mode)) return;
+    DmShellFileIdentity actual = {
+        .device = (uint64_t)st.st_dev, .inode = (uint64_t)st.st_ino, .size = (int64_t)st.st_size,
+        .modification_seconds = (int64_t)st.st_mtimespec.tv_sec,
+        .modification_nanoseconds = (int64_t)st.st_mtimespec.tv_nsec,
+        .change_seconds = (int64_t)st.st_ctimespec.tv_sec,
+        .change_nanoseconds = (int64_t)st.st_ctimespec.tv_nsec,
+    };
+    if (!dm_snap_file_identity_matches(actual, expected)) return;
+    for (int i = 0; i < g_nfw_snaps; i++) {
+        DmFwSnap *snap = &g_fw_snaps[i];
+        dm_snap_acknowledge_resign(snap->game_key, snap->exe_path, &snap->mtime,
+                                  game_id, executable, previous_modification_seconds,
+                                  expected.modification_seconds);
+    }
+}
+
 static NSString *documents(void) { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]; }
 
 static void clear_game_env(void) {

@@ -66,7 +66,10 @@ func sampleGame() throws -> LaunchableGame {
         let box = LogBox()
         let launcher = StubGameLauncher(log: { box.add($0) })
         let game = try sampleGame()
-        await #expect(throws: GameLaunchError.notAvailable) { try await launcher.launch(game) }
+        await #expect(throws: GameLaunchError.notAvailable) {
+            try await launcher.launch(game)
+        }
+        #expect(!launcher.isGameRunning, "A failed launch must not permanently prevent signing")
         #expect(box.all.count == 1)
         #expect(box.all[0].contains(Fixtures.orbit) && box.all[0].contains("does not start it"))
         #expect(GameLaunchError.notAvailable.localizedDescription == "Launching is not available yet.")
