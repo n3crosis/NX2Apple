@@ -2553,5 +2553,7 @@
   "ios.host.sharing.allow_internet": "Allow internet transfer",
   "ios.host.sharing.save_file": "Save to file",
   "ios.host.sharing.stop": "Stop sharing",
-  "ios.host.sharing.unavailable": "Game package unavailable"
+  "ios.host.sharing.unavailable": "Game package unavailable",
+  "ios.host.Export NXB": "Export NXB",
+  "ios.host.External sharing": "External sharing"
 }

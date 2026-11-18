@@ -2554,5 +2554,7 @@
   "ios.host.sharing.allow_internet": "인터넷 전송 허용",
   "ios.host.sharing.save_file": "파일로 저장",
   "ios.host.sharing.stop": "공유 중지",
-  "ios.host.sharing.unavailable": "게임 패키지를 사용할 수 없음"
+  "ios.host.sharing.unavailable": "게임 패키지를 사용할 수 없음",
+  "ios.host.Export NXB": "NXB 내보내기",
+  "ios.host.External sharing": "외부 공유"
 }

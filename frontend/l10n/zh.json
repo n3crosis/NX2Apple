@@ -2554,5 +2554,7 @@
   "ios.host.sharing.allow_internet": "允许互联网传输",
   "ios.host.sharing.save_file": "保存到文件",
   "ios.host.sharing.stop": "停止共享",
-  "ios.host.sharing.unavailable": "游戏包不可用"
+  "ios.host.sharing.unavailable": "游戏包不可用",
+  "ios.host.Export NXB": "导出 NXB",
+  "ios.host.External sharing": "外部共享"
 }

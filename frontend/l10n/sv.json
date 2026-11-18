@@ -2554,5 +2554,7 @@
   "ios.host.sharing.allow_internet": "Tillåt överföring via internet",
   "ios.host.sharing.save_file": "Spara till fil",
   "ios.host.sharing.stop": "Sluta dela",
-  "ios.host.sharing.unavailable": "Spelpaketet är inte tillgängligt"
+  "ios.host.sharing.unavailable": "Spelpaketet är inte tillgängligt",
+  "ios.host.Export NXB": "Exportera NXB",
+  "ios.host.External sharing": "Extern delning"
 }

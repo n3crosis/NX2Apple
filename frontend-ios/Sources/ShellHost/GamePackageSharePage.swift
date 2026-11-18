@@ -1,5 +1,4 @@
 import SwiftUI
-import CoreTransferable
 import UniformTypeIdentifiers
 import CoreImage.CIFilterBuiltins
 import ShellUI
@@ -18,32 +17,21 @@ struct GamePackageSharePage: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var server: GamePackageShareServer?
     @State private var linkTask: Task<Void, Never>?
-    @State private var remote: Bool?
+    @State private var remote: Bool? = false
     @State private var link: URL?
     @State private var linkError: String?
     @State private var fileError: String?
     @State private var exporting = false
     @State private var savingFile = false
-    @State private var archive: PackageExportFile?
+    @State private var archive: URL?
     @State private var previousIdleTimerDisabled: Bool?
 
     var body: some View {
         Form {
             Section { Text(verbatim: entry.manifest.name).font(.headline) }
             Section {
-                Button(hostText("Save to file")) { exporting = true }
-                    .disabled(exporting || savingFile)
-                    .accessibilityIdentifier("sharing.saveFile")
-                if exporting { ProgressView() }
-                if let fileError { Text(verbatim: fileError).textSelection(.enabled) }
-            }
-            Section {
                 if remote == nil {
                     Button(hostText("Local network")) { remote = false }
-                    if gameTunnel != nil {
-                        Text(hostText("Cloudflare can read transferred game data. Anyone with the link can download it."))
-                        Button(hostText("Share over the internet")) { remote = true }
-                    }
                 } else if let link {
                     if let image = qrCode(link.absoluteString) {
                         Image(decorative: image, scale: 1).interpolation(.none).resizable()
@@ -58,6 +46,24 @@ struct GamePackageSharePage: View {
                     Button(hostText("Stop sharing")) { remote = nil }
                         .accessibilityIdentifier("sharing.stopLink")
                 }
+            }
+            Section {
+                if gameTunnel != nil {
+                    Toggle(hostText("External sharing"), isOn: Binding(
+                        get: { remote == true }, set: { remote = $0 }))
+                        .accessibilityIdentifier("sharing.external")
+                    if remote == true {
+                        Text(hostText("Cloudflare can read transferred game data. Anyone with the link can download it."))
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Section {
+                Button(hostText("Export NXB")) { exporting = true }
+                    .disabled(exporting || savingFile)
+                    .accessibilityIdentifier("sharing.saveFile")
+                if exporting { ProgressView() }
+                if let fileError { Text(verbatim: fileError).textSelection(.enabled) }
             }
         }
         .navigationTitle(hostText("Share game"))
@@ -77,21 +83,23 @@ struct GamePackageSharePage: View {
                     try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
                     return
                 }
-                archive = PackageExportFile(url: url)
+                archive = url
                 savingFile = true
             } catch {
                 if !Task.isCancelled { fileError = error.localizedDescription }
             }
         }
-        .fileExporter(isPresented: $savingFile, item: archive, contentTypes: [.data],
-                      defaultFilename: entry.id + ".nxb", onCompletion: { result in
-            if case .failure(let error) = result {
-                fileError = GamePackageReceiveView.importFailureMessage(error)
+        .background {
+            if let archive, savingFile {
+                PackageExportShareSheet(url: archive) { error in
+                    if let error { fileError = GamePackageReceiveView.importFailureMessage(error) }
+                    clearArchive()
+                }
             }
-            clearArchive()
-        }, onCancellation: { clearArchive() })
+        }
         .onAppear {
             onOpen()
+            if linkTask == nil { restartLink() }
             #if os(iOS)
             if previousIdleTimerDisabled == nil {
                 previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
@@ -148,7 +156,7 @@ struct GamePackageSharePage: View {
     }
 
     private func clearArchive() {
-        if let archive { try? FileManager.default.removeItem(at: archive.url.deletingLastPathComponent()) }
+        if let archive { try? FileManager.default.removeItem(at: archive.deletingLastPathComponent()) }
         archive = nil
         savingFile = false
     }
@@ -161,11 +169,3 @@ struct GamePackageSharePage: View {
     }
 }
 
-private struct PackageExportFile: Transferable {
-    let url: URL
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .data) { file in
-            SentTransferredFile(file.url)
-        }
-    }
-}

@@ -2553,5 +2553,7 @@
   "ios.host.sharing.allow_internet": "インターネット転送を許可",
   "ios.host.sharing.save_file": "ファイルに保存",
   "ios.host.sharing.stop": "共有を停止",
-  "ios.host.sharing.unavailable": "ゲームパッケージを利用できません"
+  "ios.host.sharing.unavailable": "ゲームパッケージを利用できません",
+  "ios.host.Export NXB": "NXBを書き出す",
+  "ios.host.External sharing": "外部共有"
 }

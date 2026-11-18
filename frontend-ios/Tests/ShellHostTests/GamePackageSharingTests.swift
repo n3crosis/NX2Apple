@@ -2,6 +2,22 @@ import XCTest
 @testable import ShellHost
 
 final class GamePackageSharingTests: XCTestCase {
+    #if os(macOS)
+    @MainActor func testExportShareCompletionRunsOnceOnCancellationOrFailure() {
+        var callbacks = 0
+        var reported: Error?
+        let coordinator = PackageExportShareSheet.Coordinator { error in
+            callbacks += 1
+            reported = error
+        }
+        let failure = CocoaError(.fileReadNoPermission)
+        coordinator.finish(failure)
+        coordinator.finish(nil)
+        XCTAssertEqual(callbacks, 1, "Archive cleanup must not race repeated sharing callbacks")
+        XCTAssertEqual((reported as NSError?)?.code, failure.errorCode)
+    }
+    #endif
+
     @MainActor func testFilePickerCancellationIsNotAnImportFailure() {
         XCTAssertNil(GamePackageReceiveView.importFailureMessage(CocoaError(.userCancelled)))
         XCTAssertNil(GamePackageReceiveView.importFailureMessage(URLError(.cancelled)))

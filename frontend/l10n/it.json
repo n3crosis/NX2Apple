@@ -2554,5 +2554,7 @@
   "ios.host.sharing.allow_internet": "Consenti trasferimento via Internet",
   "ios.host.sharing.save_file": "Salva su file",
   "ios.host.sharing.stop": "Interrompi condivisione",
-  "ios.host.sharing.unavailable": "Pacchetto del gioco non disponibile"
+  "ios.host.sharing.unavailable": "Pacchetto del gioco non disponibile",
+  "ios.host.Export NXB": "Esporta NXB",
+  "ios.host.External sharing": "Condivisione esterna"
 }
