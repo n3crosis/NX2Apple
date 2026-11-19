@@ -230,6 +230,7 @@ class NxkitShellPackageTests(unittest.TestCase):
             self.assertIn('NXKitRuntimeRevision: "' + 'a' * 40 + '"', project)
             self.assertNotIn('# @FRAMEWORKS@', project)
             self.assertNotIn('keychain-access-groups:', project)
+            self.assertNotIn('Gen/nx2apple.sh', project)
             env['SHELL_PLATFORM'] = 'maccatalyst'
             subprocess.run([sys.executable, '-I', '-', str(SCRIPT.parent / 'project-shell.yml'), tmp],
                            input=generator, text=True, env=env, check=True)
@@ -237,14 +238,53 @@ class NxkitShellPackageTests(unittest.TestCase):
             self.assertIn('path: Gen/DmShell.entitlements', project)
             self.assertIn('keychain-access-groups: ["$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)"]', project)
             self.assertNotIn('com.apple.security.application-groups:', project)
+            self.assertIn('path: Gen/nx2apple.sh\n        buildPhase: resources', project)
+
+    def test_catalyst_cli_wrapper_preserves_arguments_progress_and_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contents = Path(tmp) / 'Moved NX2Apple.app/Contents'
+            resources = contents / 'Resources'
+            resources.mkdir(parents=True)
+            cli = resources / 'nx2apple.sh'
+            cli.write_bytes((SCRIPT.parent / cli.name).read_bytes())
+            app = contents / 'MacOS/DmShell'
+            app.parent.mkdir()
+            app.write_text("#!/bin/sh\nprintf '<%s>\\n' \"$@\"\nprintf 'progress\\n' >&2\nexit 23\n")
+            app.chmod(0o755)
+            for args in ([], ['import', 'path with spaces/$fixture.nxb', '--json'],
+                         ['build', 'base game.nsp', 'new game.nxb', '--json'],
+                         ['list', '--json'], ['status', '--json'], ['--version'],
+                         ['inspect', 'input game.nxb'], ['verify', 'input game.nxb', '--require-compatible'],
+                         ['build', 'base.nsp', 'output.nxb', '--update', 'update.nsp', '--dlc', 'add on.nsp'],
+                         ['receive', '-', '--external', '--json'],
+                         ['export', '010020D01AD24000', 'export game.nxb'],
+                         ['share', 'share game.nxb', '--local'],
+                         ['share', '010020D01AD24000', '--external', '--json']):
+                result = subprocess.run(['/bin/sh', str(cli), *args], cwd=tmp,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 23)
+                self.assertEqual(result.stdout.splitlines(), [f'<{arg}>' for arg in (args or ['--help'])])
+                self.assertEqual(result.stderr, 'progress\n')
+            unknown = subprocess.run(['/bin/sh', str(cli), 'buidl'], capture_output=True, text=True)
+            self.assertEqual(unknown.returncode, 64)
+            self.assertEqual(unknown.stdout, '')
+            self.assertIn('Unknown command', unknown.stderr)
 
     def test_catalyst_validation_does_not_require_or_export_signing(self):
         script = (SCRIPT.parent / 'build_nxkit_shell.sh').read_text()
         platform = script.split('case "$SHELL_PLATFORM" in', 1)[1].split('mkdir -p "$SHELL_DIR"', 1)[0]
         build = script.split('cd "$S"\nxcodegen generate', 1)[1]
         commands = """set -eu
-xcodebuild() { printf '%s\\n' "$@" > "$S/arguments"; }
-codesign() { touch "$S/signed"; }
+xcodebuild() {
+  printf '%s\\n' "$@" > "$S/arguments"
+  mkdir -p "$S/dd/Build/Products/Release-maccatalyst/DmShell.app/Contents/Resources"
+  touch "$S/dd/Build/Products/Release-maccatalyst/DmShell.app/Contents/Resources/nx2apple.sh"
+}
+security() { printf '  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Fixture"\n'; }
+codesign() {
+  if [ "$1" = --verify ]; then touch "$S/signed"; else touch codesign0; fi
+}
+shasum() { printf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  codesign0\n'; }
 ditto() { touch "$S/exported"; }
 """ + 'case "$SHELL_PLATFORM" in' + platform + build
         for mode, identity in [('--prepare-xcode', ''), ('--build-unsigned', ''), ('--build', ''), ('--build', 'Fixture')]:
@@ -261,7 +301,10 @@ ditto() { touch "$S/exported"; }
                 self.assertEqual((out / 'exported').exists(), mode == '--build')
                 if mode != '--prepare-xcode':
                     expected = 'YES' if identity else 'NO'
-                    self.assertIn('CODE_SIGNING_ALLOWED=' + expected, (out / 'arguments').read_text())
+                    arguments = (out / 'arguments').read_text().splitlines()
+                    self.assertIn('CODE_SIGNING_ALLOWED=' + expected, arguments)
+                    self.assertEqual('DEVELOPMENT_TEAM=FIXTURE' in arguments, mode == '--build')
+                    self.assertEqual('CODE_SIGN_IDENTITY=Apple Development' in arguments, mode == '--build')
                 else:
                     self.assertFalse((out / 'arguments').exists())
 

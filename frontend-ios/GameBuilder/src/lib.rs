@@ -41,7 +41,7 @@ fn prepare(json: &str, report: &dyn Fn(&str) -> bool) -> Result<(), String> {
         auto_analyze: true,
         ..Default::default()
     };
-    nxb_build::prepare_nxb_with_progress(
+    nxb_build::prepare_nxb_with_detailed_progress(
         &args,
         &request.output,
         nxb_build::BuildMetadata {
@@ -59,7 +59,7 @@ fn prepare(json: &str, report: &dyn Fn(&str) -> bool) -> Result<(), String> {
 /// `request_json` is a valid NUL-terminated UTF-8 string for the call duration.
 /// If non-null, `error` points to at least `capacity` writable bytes, disjoint
 /// from the request. No pointers are retained. The optional callback runs on this
-/// thread and its stage string is valid only during the callback. Context remains
+/// thread; its phase or substage string is valid only during the callback. Context remains
 /// caller-owned and must be valid until this call returns. Return zero from the
 /// callback to cancel before the next stage.
 #[unsafe(no_mangle)]
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn nxkit_prepare_nxb(
             .map_err(|e| e.to_string())?;
         prepare(json, &|stage| {
             if let Some(progress) = progress {
-                let stage = CString::new(stage).expect("static stage name");
+                let stage = CString::new(stage).expect("stage ID and counts contain no NUL");
                 progress(stage.as_ptr(), context) != 0
             } else {
                 true

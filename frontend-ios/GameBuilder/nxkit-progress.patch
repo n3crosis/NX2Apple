@@ -1,0 +1,468 @@
+diff --git a/crates/nxb-build/src/lib.rs b/crates/nxb-build/src/lib.rs
+index 2b0e48647e042bb704562f6136e4fe141423c426..68ebf5dcdb0657af05a87261587adfb7bf6c5160 100644
+--- a/crates/nxb-build/src/lib.rs
++++ b/crates/nxb-build/src/lib.rs
+@@ -127,4 +127,6 @@ pub fn main(argv: &[String]) -> i32 {
+ }
+
+ /// In-process preparation of unsigned modules, without a desktop app or tools.
+-pub use standalone::prepare::{BuildMetadata, prepare_nxb, prepare_nxb_with_progress};
++pub use standalone::prepare::{
++    BuildMetadata, prepare_nxb, prepare_nxb_with_detailed_progress, prepare_nxb_with_progress,
++};
+diff --git a/crates/nxb-build/src/package.rs b/crates/nxb-build/src/package.rs
+index 8ffed447d7ff62552691163f4b77adcece5f5fb4..227cc154e9e5fe5e3a72bfabe62dfb560d4c3325 100644
+--- a/crates/nxb-build/src/package.rs
++++ b/crates/nxb-build/src/package.rs
+@@ -91,6 +91,17 @@ pub fn write_signed(
+     output: &Path,
+     metadata: &Metadata,
+     publisher: Option<(&Publisher, Signer<'_>)>,
++) -> Result<(), String> {
++    write_with_progress(root, output, metadata, publisher, &|_, _| Ok(()), &|| Ok(()))
++}
++
++pub(crate) fn write_with_progress(
++    root: &Path,
++    output: &Path,
++    metadata: &Metadata,
++    publisher: Option<(&Publisher, Signer<'_>)>,
++    report_write: &dyn Fn(usize, usize) -> Result<(), String>,
++    report_hash: &dyn Fn() -> Result<(), String>,
+ ) -> Result<(), String> {
+     let fail = |e: std::io::Error| e.to_string();
+     validate_metadata(metadata)?;
+@@ -111,6 +122,7 @@ pub fn write_signed(
+     }
+     let root = root.as_path();
+     let mut entries = Vec::new();
++    report_hash()?;
+     collect(root, root, &mut entries)?;
+     entries.sort_by(|a, b| a.path.cmp(&b.path));
+     let mut paths = BTreeSet::new();
+@@ -219,7 +231,8 @@ pub fn write_signed(
+                 .map_err(|e| e.to_string())?;
+             zip.write_all(proof).map_err(fail)?;
+         }
+-        for entry in &entries {
++        report_write(0, entries.len())?;
++        for (i, entry) in entries.iter().enumerate() {
+             let path = root.join(
+                 entry
+                     .path
+@@ -240,6 +253,7 @@ pub fn write_signed(
+             if bytes != entry.bytes || digest != entry.sha256 {
+                 return Err("payload changed while packaging".into());
+             }
++            report_write(i + 1, entries.len())?;
+         }
+         zip.finish()
+             .map_err(|e| e.to_string())?
+@@ -406,6 +420,26 @@ mod tests {
+             .read_to_end(&mut binary)
+             .unwrap();
+         assert_eq!(binary, [0u8; 32]);
++        let detailed = root.join("detailed.nxb");
++        let counts = std::cell::RefCell::new(Vec::new());
++        write_with_progress(
++            &run, &detailed, &metadata, None,
++            &|done, total| {
++                counts.borrow_mut().push((done, total));
++                Ok(())
++            },
++            &|| Ok(()),
++        )
++        .unwrap();
++        assert_eq!(counts.into_inner(), [(0, 2), (1, 2), (2, 2)]);
++        assert_eq!(fs::read(&output).unwrap(), fs::read(detailed).unwrap());
++        let cancelled = root.join("cancelled.nxb");
++        assert!(write_with_progress(
++            &run, &cancelled, &metadata, None,
++            &|done, _| if done == 1 { Err("cancelled".into()) } else { Ok(()) },
++            &|| Ok(()),
++        ).is_err());
++        assert!(!cancelled.exists());
+         assert!(write(&run, &output, &metadata).is_err());
+         for (algorithm, fixture) in [
+             ("ES256", include_str!("../tests/fixtures/ES256.json")),
+diff --git a/crates/nxb-build/src/standalone/auto_shaders.rs b/crates/nxb-build/src/standalone/auto_shaders.rs
+index b53aa8d594dbb3a5531e957c64147ec92aeeec2b..8b01b5d3c0880ef7ec382ce6aaa76ec66cdf7253 100644
+--- a/crates/nxb-build/src/standalone/auto_shaders.rs
++++ b/crates/nxb-build/src/standalone/auto_shaders.rs
+@@ -1,4 +1,5 @@
+ //! In-memory orchestration of nxkit's unmodified split, job and compiler APIs.
++use super::prepare::{counted, stage};
+ use nxb_pyjson::{Value as J, dumps, parse};
+ type Result<T> = std::result::Result<T, String>;
+ const INPUT_LIMIT: usize = 256 * 1024 * 1024;
+@@ -100,16 +101,18 @@ pub(super) fn discover(
+             src: Arc::new(Owned(data.clone())),
+         });
+     }
+-    discover_sources(modules, files, ios)
++    discover_sources(modules, files, ios, &|_| true)
+ }
+
+ pub(super) fn discover_paths(
+     modules: &[(String, Vec<u8>)],
+     resources: &[(String, std::path::PathBuf)],
+     ios: bool,
++    report: &dyn Fn(&str) -> bool,
+ ) -> Result<Vec<(String, Vec<u8>)>> {
+     let mut files = Vec::new();
+-    for (name, path) in resources {
++    counted(report, "shaders.index", 0, resources.len())?;
++    for (i, (name, path)) in resources.iter().enumerate() {
+         let rel = name.strip_prefix("romfs/").unwrap_or(name);
+         let src: Arc<dyn src::Src> = Arc::new(Disk {
+             path: path.clone(),
+@@ -121,8 +124,9 @@ pub(super) fn discover_paths(
+             live: jobs::deferred(rel, &head),
+             src,
+         });
++        counted(report, "shaders.index", i + 1, resources.len())?;
+     }
+-    discover_sources(modules, files, ios)
++    discover_sources(modules, files, ios, report)
+ }
+
+ struct Disk {
+@@ -151,12 +155,14 @@ fn discover_sources(
+     modules: &[(String, Vec<u8>)],
+     mut files: Vec<jobs::File>,
+     ios: bool,
++    report: &dyn Fn(&str) -> bool,
+ ) -> Result<Vec<(String, Vec<u8>)>> {
+     let profile = shaders::Profile::default();
+     let mut results = Vec::new();
+     let mut notes = Vec::new();
+     let mut common = None;
+-    for (name, nso) in modules {
++    counted(report, "shaders.modules", 0, modules.len())?;
++    for (i, (name, nso)) in modules.iter().enumerate() {
+         safe_name(name)?;
+         check_nso_size(nso)?;
+         let image = nxb_split::nso::image(nso).map_err(|e| format!("{name}: {e}"))?;
+@@ -175,10 +181,12 @@ fn discover_sources(
+             pairs,
+             ..Default::default()
+         });
++        counted(report, "shaders.modules", i + 1, modules.len())?;
+     }
+     files.sort_by(|a, b| a.rel.cmp(&b.rel));
+     let mut dicts = zstd::Dicts::new();
+-    for file in &files {
++    counted(report, "shaders.dictionaries", 0, files.len())?;
++    for (i, file) in files.iter().enumerate() {
+         let head = file.src.read_up(0, 16).map_err(|e| e.to_string())?;
+         if head.starts_with(&[0x37, 0xa4, 0x30, 0xec]) {
+             let raw = file.src.all().map_err(|e| e.to_string())?;
+@@ -192,6 +200,7 @@ fn discover_sources(
+                 }
+             }
+         }
++        counted(report, "shaders.dictionaries", i + 1, files.len())?;
+     }
+     let plan = jobs::plan(&files).map_err(|e| e.to_string())?;
+     notes.extend(plan.notes);
+@@ -199,13 +208,16 @@ fn discover_sources(
+         files: &files,
+         dicts: &dicts,
+     };
+-    for job in plan.jobs {
++    let total_jobs = plan.jobs.len();
++    counted(report, "shaders.jobs", 0, total_jobs)?;
++    for (i, job) in plan.jobs.into_iter().enumerate() {
+         let out = (job.run)(&ctx, &mut notes).map_err(|e| format!("{}: {e}", job.rel))?;
+         if let Some(result) =
+             scanfile::finish(&profile, out.found, &out.var).map_err(|e| e.to_string())?
+         {
+             results.push(result);
+         }
++        counted(report, "shaders.jobs", i + 1, total_jobs)?;
+     }
+     let env = scanfile::Env {
+         dicts: &dicts,
+@@ -215,8 +227,10 @@ fn discover_sources(
+     let mut deferred = Vec::new();
+     let mut plain = Vec::new();
+     let mut trees = unity::ser::Trees::new();
++    counted(report, "shaders.resources", 0, files.len())?;
+     for (i, file) in files.iter().enumerate() {
+         if plan.taken.contains(&i) {
++            counted(report, "shaders.resources", i + 1, files.len())?;
+             continue;
+         }
+         let label = format!("/{}", file.rel);
+@@ -245,6 +259,7 @@ fn discover_sources(
+                 plain.push((i, result));
+             }
+         }
++        counted(report, "shaders.resources", i + 1, files.len())?;
+     }
+     if !deferred.is_empty() {
+         for (key, value) in unity::ser::known_trees().map_err(|e| e.to_string())? {
+@@ -254,7 +269,9 @@ fn discover_sources(
+             trees: Some(&trees),
+             ..env
+         };
+-        for i in deferred {
++        let total_deferred = deferred.len();
++        counted(report, "shaders.deferred", 0, total_deferred)?;
++        for (step, i) in deferred.into_iter().enumerate() {
+             let file = &files[i];
+             let result = scanfile::scan_file(
+                 &profile,
+@@ -271,8 +288,10 @@ fn discover_sources(
+                 }
+                 plain.push((i, result));
+             }
++            counted(report, "shaders.deferred", step + 1, total_deferred)?;
+         }
+     }
++    stage(report, "shaders.assemble")?;
+     // Deferred Unity scans keep their original file order at the merge.
+     plain.sort_by_key(|(i, _)| *i);
+     results.extend(plain.into_iter().map(|(_, result)| result));
+@@ -341,7 +360,7 @@ fn discover_sources(
+         ),
+     ];
+     let pairs = output.pairs.union(&output.pso_pairs).cloned().collect();
+-    compile(jobs, &pairs, tables, notes, ios)
++    compile(jobs, &pairs, tables, notes, ios, report)
+ }
+
+ fn compile(
+@@ -350,6 +369,7 @@ fn compile(
+     mut files: Vec<(String, Vec<u8>)>,
+     notes: Vec<String>,
+     ios: bool,
++    report: &dyn Fn(&str) -> bool,
+ ) -> Result<Vec<(String, Vec<u8>)>> {
+     // The shared scanner marks unreadable or omitted content as RED. Generic builds have no partial mode.
+     if let Some(note) = notes.iter().find(|note| note.starts_with("[RED]")) {
+@@ -365,7 +385,9 @@ fn compile(
+     jobs.sort_by(|a, b| (a.job.stage != "ps", &a.job.key).cmp(&(b.job.stage != "ps", &b.job.key)));
+     let chain = nxb_shader::chain::standalone_version();
+     let mut inputs = BTreeMap::<String, StageInputs>::new();
+-    for entry in jobs {
++    let total = jobs.len();
++    counted(report, "shaders.compile", 0, total)?;
++    for (i, entry) in jobs.into_iter().enumerate() {
+         let key = &entry.job.key;
+         let partners = pairs
+             .iter()
+@@ -411,6 +433,7 @@ fn compile(
+                 ));
+             }
+         }
++        counted(report, "shaders.compile", i + 1, total)?;
+     }
+     if !notes.is_empty() {
+         files.push(file("shaders/warnings.txt", notes.join("\n").as_bytes()));
+@@ -454,6 +477,7 @@ mod tests {
+             vec![],
+             vec!["[RED] /content.pak: its shaders are left out".into()],
+             false,
++            &|_| true,
+         );
+         assert!(
+             result
+@@ -481,7 +505,20 @@ mod tests {
+             true,
+         )
+         .unwrap();
+-        let disk = discover_paths(&[], &[("romfs/resource.txt".into(), path)], true).unwrap();
++        let reports = std::cell::RefCell::new(Vec::new());
++        let disk = discover_paths(
++            &[],
++            &[("romfs/resource.txt".into(), path)],
++            true,
++            &|event| {
++                reports.borrow_mut().push(event.to_owned());
++                true
++            },
++        )
++        .unwrap();
++        let reports = reports.into_inner();
++        assert!(reports.iter().any(|event| event == "shaders.resources:1:1"));
++        assert!(reports.iter().any(|event| event == "shaders.compile:0:0"));
+         assert_eq!(memory, disk);
+         std::fs::remove_dir_all(root).unwrap();
+     }
+diff --git a/crates/nxb-build/src/standalone/extract.rs b/crates/nxb-build/src/standalone/extract.rs
+index 444cea626412434203d6adaa1500e34141defe15..8f25c64bcde9e24938f2a444fcd73673c4b09f11 100644
+--- a/crates/nxb-build/src/standalone/extract.rs
++++ b/crates/nxb-build/src/standalone/extract.rs
+@@ -125,6 +125,16 @@ pub(super) fn extract(a: &Args, p: &Progress) -> Result<Extracted, String> {
+ }
+
+ pub(super) fn extract_disk(a: &Args, p: &Progress) -> Result<DiskExtract, String> {
++    extract_disk_with_progress(a, p, &|_| true)
++}
++
++pub(super) fn extract_disk_with_progress(
++    a: &Args,
++    p: &Progress,
++    report: &dyn Fn(&str) -> bool,
++) -> Result<DiskExtract, String> {
++    use super::prepare::stage;
++    stage(report, "extract.read")?;
+     let src = crate::inputs::discover_generic(a)?;
+     let version = src.updates.last().map_or(src.base_version, |u| u.0);
+     let scratch =
+@@ -148,6 +158,7 @@ pub(super) fn extract_disk(a: &Args, p: &Progress) -> Result<DiskExtract, String
+     for note in &b.src.notes {
+         p.say(note);
+     }
++    stage(report, "extract.payload")?;
+     if b.src.source == Source::Nup {
+         let external_update = b.updates.last().filter(|(_, path)| path != &b.base);
+         if external_update.is_some() && !b.src.has_base {
+@@ -209,8 +220,12 @@ pub(super) fn extract_disk(a: &Args, p: &Progress) -> Result<DiskExtract, String
+         })
+         .map_err(|e| crate::extract_stage::damaged(p, &e))?;
+         result.closing.wait();
++        stage(report, "extract.romfs")?;
+         romfs::unpack(&ex.join("RomFS.img"), &loose, |_, _| {})?;
+     }
++    if !b.src.dlc.is_empty() {
++        stage(report, "extract.dlc")?;
++    }
+     crate::extract_stage::dlc(a, &b, p)?;
+     for (id, version, path) in &b.src.dlc {
+         if b.src.source == Source::Nup && path == &b.base {
+diff --git a/crates/nxb-build/src/standalone/prepare.rs b/crates/nxb-build/src/standalone/prepare.rs
+index 50bfaee91fe5d296cfa116fb829c9fde387b4740..b56741da3d9acc79389697363d93b57bfcb12746 100644
+--- a/crates/nxb-build/src/standalone/prepare.rs
++++ b/crates/nxb-build/src/standalone/prepare.rs
+@@ -10,16 +10,20 @@ fn prepare_game(
+     report: &dyn Fn(&str) -> bool,
+ ) -> Result<(), String> {
+     stage(report, "analyze")?;
++    stage(report, "analyze.modules")?;
+     let analyzed = analysis::analyze(&game)?;
++    stage(report, "analyze.manifest")?;
+     let manifest = analyzed.manifest(&game);
+     // Release the original modules before allocating the linked image.
+     let npdm = game.npdm;
+     drop(game.modules);
+     stage(report, "link")?;
+     let platform = if cfg!(target_abi = "macabi") { 6 } else { 2 };
++    stage(report, "link.image")?;
+     let dylib = link::dylib_for(&analyzed.modules, platform, minimum_version)?;
+     std::fs::create_dir(output).map_err(|e| e.to_string())?;
+     let result = (|| {
++        stage(report, "link.modules")?;
+         link::module_files(output, &analyzed.modules, |_, _| {})?;
+         std::fs::write(output.join("main.npdm"), npdm).map_err(|e| e.to_string())?;
+         std::fs::write(output.join("game.json"), manifest).map_err(|e| e.to_string())?;
+@@ -55,26 +59,33 @@ fn prepare_payload_with_progress(
+ ) -> Result<(), String> {
+     stage(report, "shaders")?;
+     let (files, directories) = resource_files(resources)?;
+-    let shaders = auto_shaders::discover_paths(&input.modules, &files, !cfg!(target_abi = "macabi"))?;
++    let shaders =
++        auto_shaders::discover_paths(&input.modules, &files, !cfg!(target_abi = "macabi"), report)?;
+     prepare_game(input, output, minimum_version, report)?;
+     stage(report, "resources")?;
+     let result = (|| {
+         for directory in directories {
+             std::fs::create_dir_all(output.join(directory)).map_err(|e| e.to_string())?;
+         }
+-        for (name, source) in files {
++        let total = files.len();
++        counted(report, "resources.copy", 0, total)?;
++        for (i, (name, source)) in files.into_iter().enumerate() {
+             let mut source = std::fs::File::open(source).map_err(|e| e.to_string())?;
+             let mut destination =
+                 std::fs::File::create_new(output.join(name)).map_err(|e| e.to_string())?;
+             std::io::copy(&mut source, &mut destination).map_err(|e| e.to_string())?;
++            counted(report, "resources.copy", i + 1, total)?;
+         }
+-        for (name, bytes) in shaders {
++        let total = shaders.len();
++        counted(report, "resources.shaders", 0, total)?;
++        for (i, (name, bytes)) in shaders.into_iter().enumerate() {
+             let path = output.join(name);
+             if let Some(parent) = path.parent() {
+                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+             }
+             let mut file = std::fs::File::create_new(path).map_err(|e| e.to_string())?;
+             std::io::Write::write_all(&mut file, &bytes).map_err(|e| e.to_string())?;
++            counted(report, "resources.shaders", i + 1, total)?;
+         }
+         Ok(())
+     })();
+@@ -125,7 +136,7 @@ fn resource_files(root: &Path) -> Result<ResourceFiles, String> {
+     Ok((files, directories))
+ }
+
+-fn stage(report: &dyn Fn(&str) -> bool, name: &str) -> Result<(), String> {
++pub(super) fn stage(report: &dyn Fn(&str) -> bool, name: &str) -> Result<(), String> {
+     if report(name) {
+         Ok(())
+     } else {
+@@ -133,6 +144,20 @@ fn stage(report: &dyn Fn(&str) -> bool, name: &str) -> Result<(), String> {
+     }
+ }
+
++// Bound telemetry on large ROMs while preserving the exact start and finish.
++pub(super) fn counted(
++    report: &dyn Fn(&str) -> bool,
++    name: &str,
++    done: usize,
++    total: usize,
++) -> Result<(), String> {
++    let stride = total.div_ceil(200).max(1);
++    if done == 0 || done == total || done % stride == 0 {
++        stage(report, &format!("{name}:{done}:{total}"))?;
++    }
++    Ok(())
++}
++
+ static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+ /// Runtime compatibility and package identity supplied by the calling shell.
+@@ -165,6 +190,18 @@ pub fn prepare_nxb_with_progress(
+     output: &Path,
+     metadata: BuildMetadata,
+     report: &dyn Fn(&str) -> bool,
++) -> Result<(), String> {
++    prepare_nxb_with_detailed_progress(args, output, metadata, &|event| {
++        event.contains('.') || report(event)
++    })
++}
++
++/// Like the phase-only API, with stable substage IDs and optional done:total units.
++pub fn prepare_nxb_with_detailed_progress(
++    args: &crate::Args,
++    output: &Path,
++    metadata: BuildMetadata,
++    report: &dyn Fn(&str) -> bool,
+ ) -> Result<(), String> {
+     let _guard = BUILD
+         .try_lock()
+@@ -195,7 +232,7 @@ pub fn prepare_nxb_with_progress(
+         std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+         args.work_dir = Some(scratch);
+     }
+-    let disk = extract::extract_disk(&args, &progress)?;
++    let disk = extract::extract_disk_with_progress(&args, &progress, report)?;
+     let identity = crate::package::Metadata {
+         runtime_abi: metadata.runtime_abi,
+         runtime_revision: metadata.runtime_revision,
+@@ -213,5 +250,12 @@ pub fn prepare_nxb_with_progress(
+         report,
+     )?;
+     stage(report, "archive")?;
+-    crate::package::write(&payload, output, &identity)
++    crate::package::write_with_progress(
++        &payload,
++        output,
++        &identity,
++        None,
++        &|done, total| counted(report, "archive.write", done, total),
++        &|| stage(report, "archive.hash"),
++    )
+ }

@@ -230,10 +230,10 @@ extension NXBArchive {
     /// Rebuilds STORE entries with ZIP64 dimensions. Only one data chunk and the
     /// bounded central directory are retained, including for multi-GB games.
     static func write(_ destination: URL, reader: Reader, files: [GamePackageManifest.File],
-                      manifest: Data, proof: Data) throws {
+                      manifest: Data, proof: Data, progress: ((Int, Int) -> Void)? = nil) throws {
         let output = try FileHandle(forWritingTo: destination)
         defer { try? output.close() }
-        try write(entries: reader.entries, files: files, manifest: manifest, proof: proof,
+        try write(entries: reader.entries, files: files, manifest: manifest, proof: proof, progress: progress,
                   read: { path, offset, count in
                       try reader.read(reader.entries[path]!.start + offset, count)
                   }, emit: { try output.write(contentsOf: $0) })
@@ -243,7 +243,7 @@ extension NXBArchive {
     /// The sink may be a file or a backpressured transport. It never owns an
     /// archive-sized buffer. Offsets supplied to read are relative to each file.
     static func write(entries: [String: Entry], files: [GamePackageManifest.File],
-                      manifest: Data, proof: Data?,
+                      manifest: Data, proof: Data?, progress: ((Int, Int) -> Void)? = nil,
                       read: (String, UInt64, Int) throws -> Data,
                       emit sink: (Data) throws -> Void) throws {
         var position: UInt64 = 0
@@ -278,7 +278,10 @@ extension NXBArchive {
         for (name, data) in metadata {
             try entry(name, bytes: UInt64(data.count), crc: checksum(data), executable: false) { try emit(data) }
         }
-        for file in files {
+        progress?(0, files.count)
+        let stride = max(1, (files.count + 199) / 200)
+        for (index, file) in files.enumerated() {
+            try Task.checkCancellation()
             let source = entries[file.path]!
             try entry(file.path, bytes: source.bytes, crc: source.crc, executable: file.executable) {
                 var cursor: UInt64 = 0
@@ -299,7 +302,10 @@ extension NXBArchive {
                     throw GamePackageError.invalid("file checksum mismatch")
                 }
             }
+            let done = index + 1
+            if done != files.count, done % stride == 0 { progress?(done, files.count) }
         }
+        try Task.checkCancellation()
         let directoryOffset = position
         try emit(central)
         let endOffset = position, count = UInt64(files.count + metadata.count)
@@ -308,5 +314,6 @@ extension NXBArchive {
         try emit(words([(0x07064b50, 4), (0, 4), (endOffset, 8), (1, 4)]))
         try emit(words([(0x06054b50, 4), (0, 2), (0, 2), (0xffff, 2), (0xffff, 2),
                         (0xffffffff, 4), (0xffffffff, 4), (0, 2)]))
+        if !files.isEmpty { progress?(files.count, files.count) }
     }
 }

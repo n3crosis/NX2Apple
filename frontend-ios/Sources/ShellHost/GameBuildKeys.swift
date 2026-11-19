@@ -13,13 +13,17 @@ struct GameBuildKeys: Sendable {
     var exists: Bool { FileManager.default.fileExists(atPath: url.path) }
 
     func save(from source: URL) throws {
+        guard source.isFileURL else { throw CocoaError(.fileReadCorruptFile) }
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
         var coordinationError: NSError?
         var result: Result<Void, Error>?
         NSFileCoordinator().coordinate(readingItemAt: source, options: [], error: &coordinationError) { readable in
             result = Result {
-                guard readable.pathExtension.lowercased() == "keys" else { throw CocoaError(.fileReadCorruptFile) }
+                guard readable.pathExtension.lowercased() == "keys",
+                      try FileManager.default.attributesOfItem(atPath: readable.path)[.type] as? FileAttributeType == .typeRegular else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
                 let file = try FileHandle(forReadingFrom: readable)
                 defer { try? file.close() }
                 // Keys are small text files. Do not load an accidentally selected game into memory.

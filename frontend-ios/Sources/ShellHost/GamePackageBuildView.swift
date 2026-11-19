@@ -105,6 +105,10 @@ struct GamePackageBuildView: View {
                         if let job {
                             Text(stageLabel(job.stage))
                                 .accessibilityIdentifier("builder.stage")
+                            if let detail = GameBuildProgress.detailLabel(stage: job.stage, detail: job.detail) {
+                                Text(hostText(String.LocalizationValue(stringLiteral: detail))).font(.subheadline).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("builder.detail")
+                            }
                             if building, let stageStartedAt {
                                 HStack {
                                     Text(hostText("Time in current step"))
@@ -114,7 +118,7 @@ struct GamePackageBuildView: View {
                             }
                             if let done = job.completedFiles, let total = job.totalFiles {
                                 ProgressView(value: Double(done), total: Double(total))
-                                LabeledContent(hostText("Files prepared"), value: "\(done) / \(total)")
+                                LabeledContent(job.stage == "inputs" ? hostText("Files prepared") : hostText("Progress"), value: "\(done) / \(total)")
                                     .accessibilityIdentifier("builder.fileProgress")
                             } else if building {
                                 VStack(alignment: .leading, spacing: 8) {
@@ -359,14 +363,29 @@ struct GamePackageBuildView: View {
             progressRun = run
             stageStartedAt = Date()
             defer { progressRun = nil }
-            let output = try await build(source, keys, updateURLs, dlcURLs, work) { event in
-                Task { @MainActor in
+            // Keep one ordered consumer and drain it before publishing the
+            // installing state. Separate MainActor tasks can arrive out of order.
+            let (events, continuation) = AsyncStream<GameBuildProgress>.makeStream()
+            let consumer = Task { @MainActor in
+                for await event in events {
                     guard progressRun == run else { return }
-                    if job?.stage != event.stage { stageStartedAt = Date() }
+                    if job?.stage != event.stage || job?.detail != event.detail { stageStartedAt = Date() }
                     job?.record(event, label: stageLabel(event.stage))
                     do { try job?.save() } catch { failure = error.localizedDescription }
                 }
             }
+            let output: URL
+            do {
+                output = try await build(source, keys, updateURLs, dlcURLs, work) {
+                    continuation.yield($0)
+                }
+            } catch {
+                continuation.finish()
+                await consumer.value
+                throw error
+            }
+            continuation.finish()
+            await consumer.value
             progressRun = nil
             try Task.checkCancellation()
             installing = true

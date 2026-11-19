@@ -6,6 +6,7 @@ import ShellUI
 public struct ShellHostView: View {
     @Bindable private var model: ShellHostModel
     @State private var receivingPackage = false
+    @State private var receiveLink = ""
     @State private var receiverPresented = false
     @State private var buildingPackage = false
     private let buildGame: GamePackageBuild?
@@ -39,7 +40,8 @@ public struct ShellHostView: View {
         !receiverPresented && model.sharingPackage == nil && !buildingPackage && model.canPreparePackage
     }
 
-    private var canPrepareExternalPackage: Bool { libraryInputEnabled && model.hasExternalPackage }
+    private var canPrepareExternalPackage: Bool { libraryInputEnabled && model.hasExternalPackage && model.pendingReceiveLink == nil }
+    private var canPresentReceiveLink: Bool { libraryInputEnabled && model.pendingReceiveLink != nil }
 
     public var body: some View {
         Group {
@@ -61,7 +63,7 @@ public struct ShellHostView: View {
                         GamePackageShareView(entry: entry, gameTunnel: gameTunnel)
                     }
                     .sheet(isPresented: $receivingPackage, onDismiss: { receiverPresented = false }) {
-                        GamePackageReceiveView(model: model) { receivingPackage = false }
+                        GamePackageReceiveView(model: model, initialLink: receiveLink) { receivingPackage = false }
                     }
                     .sheet(isPresented: $buildingPackage) {
                         if let buildGame {
@@ -115,12 +117,19 @@ public struct ShellHostView: View {
                     await model.prepareNextExternalPackage()
                 }
             }
+            .onChange(of: canPresentReceiveLink, initial: true) { _, ready in
+                guard ready, let link = model.pendingReceiveLink else { return }
+                receiveLink = link
+                receiverPresented = true
+                receivingPackage = true
+                model.pendingReceiveLink = nil
+            }
             .onAppear { model.startControllers() }
             .onDisappear { model.stopControllers() }
     }
     @ViewBuilder private var importButton: some View {
         Menu {
-            Button(hostText("Import prebuilt games")) { receiverPresented = true; receivingPackage = true }
+            Button(hostText("Import prebuilt games")) { receiveLink = ""; receiverPresented = true; receivingPackage = true }
                 .accessibilityIdentifier("package.import.choose")
             if buildGame != nil { Button(hostText("Build games")) { buildingPackage = true } }
         } label: {

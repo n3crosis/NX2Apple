@@ -78,7 +78,7 @@ public actor GamePackageShareServer {
 
     /// Retains this installed generation across library cleanup in all windows.
     /// Caller stops when the sheet dismisses or the app leaves the foreground.
-    public func start(directory: URL, remote: Bool = false) async throws -> URL {
+    public func start(directory: URL, remote: Bool = false, archive: URL? = nil) async throws -> URL {
         guard application == nil, !starting, !stopping else { throw GamePackageError.invalid("sharing already active") }
         guard !remote || tunnel != nil else { throw GamePackageError.invalid("remote sharing unavailable") }
         starting = true; cancelled = false
@@ -86,7 +86,7 @@ public actor GamePackageShareServer {
         GamePackageLibrary.retainSharing(directory)
         var retained = false
         defer { if !retained { GamePackageLibrary.releaseSharing(directory) } }
-        let source = try ShareSource(directory: directory)
+        let source = try ShareSource(directory: directory, selectedArchive: archive)
         let host = try (remote ? "127.0.0.1" : Self.localAddress())
         let now = Date()
         let token = SymmetricKey(size: .bits256).withUnsafeBytes { Self.hex(Data($0)) }
@@ -101,7 +101,9 @@ public actor GamePackageShareServer {
             app.http.server.configuration.port = 0
             app.routes.defaultMaxBodySize = "1kb"
             app.get("nxb", "1", "metadata", ":kind") { request async throws -> Response in
-                try authorization.check(request)
+                guard authorization.allows(request) else {
+                    return Response(status: .unauthorized, headers: ["Cache-Control": "no-store"])
+                }
                 let bytes: Data
                 switch request.parameters.get("kind") {
                 case "manifest": bytes = source.manifestBytes
@@ -111,7 +113,9 @@ public actor GamePackageShareServer {
                 return Self.response(bytes)
             }
             app.get("nxb", "1", "file", ":index", ":offset") { request async throws -> Response in
-                try authorization.check(request)
+                guard authorization.allows(request) else {
+                    return Response(status: .unauthorized, headers: ["Cache-Control": "no-store"])
+                }
                 guard let index = request.parameters.get("index", as: Int.self),
                       let offset = request.parameters.get("offset", as: UInt64.self) else { throw Abort(.badRequest) }
                 let bytes = try await Task.detached { try source.read(index: index, offset: offset) }.value
@@ -205,30 +209,41 @@ private final class ShareAuthorization: @unchecked Sendable {
     private let expires: Date
     init(token: String, expires: Date) { self.token = token; self.expires = expires }
     func revoke() { lock.lock(); defer { lock.unlock() }; revoked = true }
-    func check(_ request: Request) throws {
+    func allows(_ request: Request) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !revoked, Date() < expires, let supplied = request.headers.bearerAuthorization?.token,
-              GamePackageShareServer.digest(Data(supplied.utf8)) == GamePackageShareServer.digest(Data(token.utf8)) else {
-            throw Abort(.unauthorized)
-        }
+              supplied.utf8.count == 64 else { return false }
+        return GamePackageShareServer.digest(Data(supplied.utf8)) == GamePackageShareServer.digest(Data(token.utf8))
     }
 }
 
 private struct ShareSource: Sendable {
     let directory: URL
-    let legacyArchive: URL?
-    let legacyEntries: [String: (start: UInt64, bytes: UInt64)]
-    let legacySize: UInt64
+    // Pin the archive opened at startup. A later rename or path replacement
+    // must not redirect requests to a different file.
+    private final class Archive: @unchecked Sendable {
+        let reader: NXBArchive.Reader
+        private let lock = NSLock()
+        init(_ reader: NXBArchive.Reader) { self.reader = reader }
+        deinit { try? reader.input.close() }
+        func read(_ path: String, bytes: UInt64, offset: UInt64, count: Int) throws -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let entry = reader.entries[path], entry.bytes == bytes else { throw Abort(.conflict) }
+            return try reader.read(entry.start + offset, count)
+        }
+    }
+    private let archiveSource: Archive?
     let manifestBytes: Data
     let proof: Data?
     let manifest: GamePackageManifest
 
-    init(directory: URL) throws {
+    init(directory: URL, selectedArchive: URL?) throws {
         self.directory = directory
-        let archive = directory.appendingPathComponent("original.nxb")
-        if FileManager.default.fileExists(atPath: archive.path) {
-            let reader = try NXBArchive.Reader(archive)
-            defer { try? reader.input.close() }
+        let archive = selectedArchive ?? directory.appendingPathComponent("original.nxb")
+        if selectedArchive != nil || FileManager.default.fileExists(atPath: archive.path) {
+            let pinned = Archive(try NXBArchive.Reader(archive))
+            let reader = pinned.reader
             guard let entry = reader.entries["nxb.json"], entry.bytes <= NXBArchive.metadataLimit else {
                 throw GamePackageError.invalid("sharing manifest missing")
             }
@@ -237,20 +252,27 @@ private struct ShareSource: Sendable {
                 guard entry.bytes <= 64 << 10 else { throw GamePackageError.invalid("sharing proof too large") }
                 proof = try reader.read(entry.start, Int(entry.bytes))
             } else { proof = nil }
-            legacyArchive = archive
-            legacyEntries = reader.entries.mapValues { ($0.start, $0.bytes) }
-            legacySize = reader.size
+            if selectedArchive != nil {
+                guard let proof else { throw GamePackageError.invalid("share a signed NXB") }
+                _ = try GamePackageSignature.verify(manifest: manifestBytes, proof: proof)
+            }
+            archiveSource = pinned
         } else {
             manifestBytes = try Self.metadata(directory.appendingPathComponent("nxb.json"))
             let url = directory.appendingPathComponent("nxb.signature.json")
             proof = FileManager.default.fileExists(atPath: url.path) ? try Self.metadata(url) : nil
             guard (proof?.count ?? 0) <= 64 << 10 else { throw GamePackageError.invalid("sharing proof too large") }
-            legacyArchive = nil
-            legacyEntries = [:]
-            legacySize = 0
+            archiveSource = nil
         }
         manifest = try JSONDecoder().decode(GamePackageManifest.self, from: manifestBytes)
         try manifest.validate()
+        if selectedArchive != nil, let archiveSource {
+            let entries = archiveSource.reader.entries
+            guard entries.count == manifest.files.count + 2,
+                  manifest.files.allSatisfy({ entries[$0.path]?.bytes == $0.bytes }) else {
+                throw GamePackageError.invalid("sharing archive inventory mismatch")
+            }
+        }
     }
 
     private static func metadata(_ url: URL) throws -> Data {
@@ -266,15 +288,8 @@ private struct ShareSource: Sendable {
         let file = manifest.files[index]
         guard offset < file.bytes else { throw Abort(.rangeNotSatisfiable) }
         let count = Int(min(UInt64(GamePackageShareServer.chunkSize), file.bytes - offset))
-        if let legacyArchive {
-            guard let entry = legacyEntries[file.path], entry.bytes == file.bytes else { throw Abort(.conflict) }
-            let handle = try FileHandle(forReadingFrom: legacyArchive)
-            defer { try? handle.close() }
-            guard try handle.seekToEnd() == legacySize else { throw Abort(.conflict) }
-            try handle.seek(toOffset: entry.start + offset)
-            let bytes = try handle.read(upToCount: count) ?? Data()
-            guard bytes.count == count else { throw Abort(.conflict) }
-            return bytes
+        if let archiveSource {
+            return try archiveSource.read(file.path, bytes: file.bytes, offset: offset, count: count)
         }
         let url = GamePackage.transportFile(file, in: directory)
         let resolved = url.resolvingSymlinksInPath().standardizedFileURL
@@ -290,16 +305,22 @@ private struct ShareSource: Sendable {
 }
 
 public actor GamePackageShareClient {
+    public typealias RemoteTransport = @Sendable (_ url: URL, _ token: String, _ maximum: Int) async throws -> Data
     private let invitation: GamePackageShareInvitation
-    private let session: URLSession
+    private let session: URLSession?
+    private let remoteTransport: RemoteTransport?
     private var metadata: (Data, Data?, GamePackage.Preview)?
 
-    public init(url: URL, remote: Bool = false) throws {
+    public init(url: URL, remote: Bool = false, remoteTransport: RemoteTransport? = nil) throws {
         let invitation = try GamePackageShareInvitation(url: url, remote: remote)
         self.invitation = invitation
-        session = URLSession(configuration: Self.sessionConfiguration(remote: remote),
-            delegate: ShareRedirects(),
-            delegateQueue: nil)
+        self.remoteTransport = remote ? remoteTransport : nil
+        if self.remoteTransport == nil {
+            session = URLSession(configuration: Self.sessionConfiguration(remote: remote),
+                delegate: ShareRedirects(), delegateQueue: nil)
+        } else {
+            session = nil
+        }
     }
 
     nonisolated static func sessionConfiguration(remote: Bool) -> URLSessionConfiguration {
@@ -385,13 +406,21 @@ public actor GamePackageShareClient {
         }
     }
 
-    deinit { session.invalidateAndCancel() }
+    deinit { session?.invalidateAndCancel() }
 
-    public func cancel() { session.invalidateAndCancel() }
+    public func cancel() { session?.invalidateAndCancel() }
 
     private func get(_ path: String, maximum: Int) async throws -> Data {
         try Task.checkCancellation()
-        var request = URLRequest(url: invitation.address.appendingPathComponent(path))
+        let url = invitation.address.appendingPathComponent(path)
+        if let remoteTransport {
+            let bytes = try await remoteTransport(url, invitation.token, maximum)
+            try Task.checkCancellation()
+            guard bytes.count <= maximum else { throw GamePackageError.invalid("shared response too large") }
+            return bytes
+        }
+        guard let session else { throw GamePackageError.invalid("sharing transport unavailable") }
+        var request = URLRequest(url: url)
         request.setValue("Bearer \(invitation.token)", forHTTPHeaderField: "Authorization")
         let (stream, response) = try await session.bytes(for: request)
         guard let response = response as? HTTPURLResponse, response.statusCode == 200,

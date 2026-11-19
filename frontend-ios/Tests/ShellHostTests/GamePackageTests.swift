@@ -43,6 +43,55 @@ import Security
         #expect(try FileManager.default.contentsOfDirectory(atPath: imports.path).isEmpty)
     }
 
+    @Test func readOnlyArchiveVerificationChecksPayloadWithoutStaging() throws {
+        let source = try #require(Bundle.module.url(forResource: "Package", withExtension: "nxb", subdirectory: "Fixtures"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archive = root.appendingPathComponent("verify.nxb")
+        let original = try Data(contentsOf: source)
+        try original.write(to: archive)
+        let before = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        var progress: [(UInt64, UInt64)] = []
+        let verified = try GamePackage.verifyArchive(archive, progressBytes: { progress.append(($0, $1)) })
+        let inspected = try GamePackage.inspect(archive)
+        #expect(verified.manifestSHA256 == inspected.manifestSHA256)
+        #expect(verified.manifest.titleID == inspected.manifest.titleID)
+        let total = verified.manifest.files.reduce(UInt64(0)) { $0 + $1.bytes }
+        #expect(progress.first?.0 == 0)
+        #expect(progress.last?.0 == total)
+        #expect(progress.allSatisfy { $0.1 == total && $0.0 <= total })
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == before)
+        #expect(try Data(contentsOf: archive) == original)
+
+        let reader = try NXBArchive.Reader(archive)
+        let entry = try #require(reader.entries["run/nxgame.dylib"])
+        try reader.input.close()
+        var broken = original
+        broken[Int(entry.start)] ^= 1
+        try broken.write(to: archive)
+        progress = []
+        _ = try GamePackage.inspect(archive) // Metadata-only inspection is intentionally insufficient.
+        #expect(throws: GamePackageError.self) {
+            _ = try GamePackage.verifyArchive(archive, progressBytes: { progress.append(($0, $1)) })
+        }
+        #expect(!progress.contains { $0.0 == $0.1 })
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == before)
+        #expect(try Data(contentsOf: archive) == broken)
+    }
+
+    @Test func readOnlyArchiveVerificationHonorsCancellation() async throws {
+        let source = try #require(Bundle.module.url(forResource: "Package", withExtension: "nxb", subdirectory: "Fixtures"))
+        let task = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try GamePackage.verifyArchive(source)
+        }
+        do {
+            _ = try await task.value
+            Issue.record("Cancelled verification completed")
+        } catch is CancellationError {}
+    }
+
     @Test func signedExportPreservesOriginalAndChecksPayloadBytes() async throws {
         let source = try #require(Bundle.module.url(forResource: "Package", withExtension: "nxb", subdirectory: "Fixtures"))
         let original = try Data(contentsOf: source)
@@ -52,7 +101,16 @@ import Security
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: folder) }
         let output = folder.appendingPathComponent("signed.nxb")
-        try GamePackage.exportSigned(source, to: output, signManifest: { _ in proof })
+        var counts: [Int] = []
+        var totalFiles = 0
+        try GamePackage.exportSigned(source, to: output, progress: { done, total in
+            totalFiles = total
+            counts.append(done)
+        }, signManifest: { _ in proof })
+        #expect(totalFiles > 0)
+        #expect(counts.first == 0)
+        #expect(counts.last == totalFiles)
+        #expect(counts == counts.sorted())
         #expect(try Data(contentsOf: source) == original)
         let result = try GamePackage.stage(output, in: folder, allowUnsigned: false,
             verifyPublisher: { try GamePackageSignature.verify(manifest: $0, proof: $1) },
@@ -72,10 +130,9 @@ import Security
         #expect(!FileManager.default.fileExists(atPath: rejected.path))
         let cancelled = folder.appendingPathComponent("cancelled.nxb")
         let export = Task.detached {
-            try GamePackage.exportSigned(source, to: cancelled) { _ in
-                withUnsafeCurrentTask { $0?.cancel() }
-                return proof
-            }
+            try GamePackage.exportSigned(source, to: cancelled, progress: { done, _ in
+                if done == 0 { withUnsafeCurrentTask { $0?.cancel() } }
+            }, signManifest: { _ in proof })
         }
         do {
             try await export.value
@@ -194,6 +251,50 @@ import Security
         invalid.files[0].path = "run/../escape"
         #expect(throws: GamePackageError.self) { try invalid.validate() }
     }
+    @Test func commandLineInstallDoesNotClobberAndReportsRealStages() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try #require(Bundle.module.url(forResource: "Package", withExtension: "nxb", subdirectory: "Fixtures"))
+        let library = GamePackageLibrary(root: root)
+        var bytes: [(UInt64, UInt64)] = []
+        let prepared = try library.prepare(source, progressBytes: { bytes.append(($0, $1)) })
+        let total = prepared.preview.manifest.files.reduce(UInt64(0)) { $0 + $1.bytes }
+        #expect(bytes.first?.0 == 0)
+        #expect(bytes.last?.0 == total)
+        #expect(bytes.allSatisfy { $0.1 == total && $0.0 <= total })
+        #expect(zip(bytes, bytes.dropFirst()).allSatisfy { $0.0.0 <= $0.1.0 })
+        var stages: [PackageImportStage] = []
+        let first = try library.install(prepared, replaceExisting: false, progress: { stages.append($0) },
+            checkCompatibility: { _ in }, sign: { _ in })
+        #expect(stages == [.signing, .installing])
+        let next = try library.prepare(source)
+        defer { library.discard(next) }
+        #expect(throws: (any Error).self) {
+            _ = try library.install(next, replaceExisting: false, checkCompatibility: { _ in }, sign: { _ in })
+        }
+        #expect(library.entries().map(\.directory) == [first.directory])
+    }
+
+    @Test func noReplacePublicationRejectsAnotherWriterAfterPrecheck() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try #require(Bundle.module.url(forResource: "Package", withExtension: "nxb", subdirectory: "Fixtures"))
+        let library = GamePackageLibrary(root: root)
+        let prepared = try library.prepare(source)
+        defer { library.discard(prepared) }
+        let titleRoot = root.appendingPathComponent(prepared.preview.manifest.titleID)
+        let active = titleRoot.appendingPathComponent("active")
+        let competing = Data(UUID().uuidString.lowercased().utf8)
+        #expect(throws: (any Error).self) {
+            _ = try library.install(prepared, replaceExisting: false, progress: { stage in
+                if stage == .installing { try? competing.write(to: active) }
+            }, checkCompatibility: { _ in }, sign: { _ in })
+        }
+        #expect(try Data(contentsOf: active) == competing)
+        #expect(FileManager.default.fileExists(atPath: prepared.directory.path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: titleRoot.path) == ["active"])
+    }
+
     @Test func installationPreservesOriginalAndActivatesOnlyAfterSigning() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

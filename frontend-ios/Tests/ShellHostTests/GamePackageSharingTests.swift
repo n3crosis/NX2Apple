@@ -95,4 +95,21 @@ final class GamePackageSharingTests: XCTestCase {
         }
     }
 
+    func testInjectedRemoteTransportReceivesOnlyValidatedAddressAndBound() async throws {
+        let token = String(repeating: "b", count: 64)
+        let url = try XCTUnwrap(URL(string: "https://fixture.trycloudflare.com/nxb/1#\(token)"))
+        let client = try GamePackageShareClient(url: url, remote: true) { address, credential, limit in
+            XCTAssertEqual(address.absoluteString, "https://fixture.trycloudflare.com/nxb/1/metadata/manifest")
+            XCTAssertEqual(credential, token)
+            XCTAssertEqual(limit, 8 << 20)
+            return Data(repeating: 0, count: limit + 1)
+        }
+        do {
+            _ = try await client.preview()
+            XCTFail("Oversized body must not be parsed")
+        } catch GamePackageError.invalid(let reason) {
+            XCTAssertEqual(reason, "shared response too large")
+        }
+    }
+
 }

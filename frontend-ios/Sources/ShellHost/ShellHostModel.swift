@@ -141,6 +141,7 @@ private struct CertificateFileVersion: Equatable {
     var innerSharingPackage: GamePackageLibrary.Entry?
     public var sharingPackage: GamePackageLibrary.Entry?
     public var packagePreview: GamePackageLibrary.Prepared?
+    var pendingReceiveLink: String?
     public private(set) var importingPackage = false
     @ObservationIgnored private var externalPackages: [(url: URL, scoped: Bool)] = []
     public private(set) var hasExternalPackage = false
@@ -303,6 +304,7 @@ private struct CertificateFileVersion: Equatable {
     @ObservationIgnored private var shellMatches: [String: URL] = [:]
     @ObservationIgnored private var shellScan: Task<Void, Never>?
     @ObservationIgnored private var romfsChecks: [URL: RomfsCheck] = [:]
+    private let commandLineMode: Bool
     @ObservationIgnored private var startupJoinTask: Task<Void, Never>?
     @ObservationIgnored private var joinGeneration: UInt64 = 0
     @ObservationIgnored private var joiningProgress: [String: DataParts.Progress] = [:]
@@ -330,7 +332,9 @@ private struct CertificateFileVersion: Equatable {
     @ObservationIgnored nonisolated(unsafe) private var returnObserver: (any NSObjectProtocol)?
 
     public init(config: ShellHostConfig, launcher: any GameLauncher = StubGameLauncher(), picker: any FolderPicker = NoFolderPicker(),
-                shellSettings: ShellSettingsStore = .current, packageLauncher: (any GamePackageLauncher)? = nil) {
+                shellSettings: ShellSettingsStore = .current, packageLauncher: (any GamePackageLauncher)? = nil,
+                commandLineMode: Bool = false) {
+        self.commandLineMode = commandLineMode
         self.config = config
         self.launcher = launcher
         self.packageLauncher = packageLauncher
@@ -356,17 +360,19 @@ private struct CertificateFileVersion: Equatable {
         }
         let gamesRoot = config.gamesRoot
         let hotRoot = config.hotFrameworksRoot
-        startupJoinTask = Task { [weak self] in
-            let joined = await Task.detached(priority: .utility) { () -> Bool in
-                let documents = dataRoot.deletingLastPathComponent()
-                DataParts.writeFeatures(documents: documents)
-                let joined = DataParts.joinAll(appDataRoot: dataRoot, partSize: partSize, onProgress: reportProgress)
-                let allEntries = GameCatalogue.scan(root: gamesRoot, hotRoot: hotRoot, gameDataRoot: dataRoot)
-                let claimed = LooseRomfsClaimer.claimAll(documents: documents, appDataRoot: dataRoot, entries: allEntries)
-                BackupExclusion.apply(appDataRoot: dataRoot)
-                return !joined.isEmpty || !claimed.isEmpty
-            }.value
-            self?.finishJoinRun(joined: joined, generation: joinGen)
+        if !commandLineMode {
+            startupJoinTask = Task { [weak self] in
+                let joined = await Task.detached(priority: .utility) { () -> Bool in
+                    let documents = dataRoot.deletingLastPathComponent()
+                    DataParts.writeFeatures(documents: documents)
+                    let joined = DataParts.joinAll(appDataRoot: dataRoot, partSize: partSize, onProgress: reportProgress)
+                    let allEntries = GameCatalogue.scan(root: gamesRoot, hotRoot: hotRoot, gameDataRoot: dataRoot)
+                    let claimed = LooseRomfsClaimer.claimAll(documents: documents, appDataRoot: dataRoot, entries: allEntries)
+                    BackupExclusion.apply(appDataRoot: dataRoot)
+                    return !joined.isEmpty || !claimed.isEmpty
+                }.value
+                self?.finishJoinRun(joined: joined, generation: joinGen)
+            }
         }
         let expirationReader = config.provisioningExpiration
         let clock = config.now
@@ -377,6 +383,7 @@ private struct CertificateFileVersion: Equatable {
             guard let self else { return }
             self.signingTeamID = team
             self.signingProfileExpiration = expiration
+            guard !commandLineMode else { return }
             self.refreshAll()
             guard !self.signingWarningDismissed else { return }
             self.signingWarning = ProvisioningProfile.warning(expiration: expiration, now: clock())
@@ -554,7 +561,7 @@ private struct CertificateFileVersion: Equatable {
     }
 
     private func reload(afterClaim: Bool) {
-        guard !resigningGame else { return }
+        guard !resigningGame, !commandLineMode else { return }
         // Imports and completed re-signs reload the catalogue, including replacements at the same path.
         try? packageLibrary.prune(preserving: GamePackageSession.loadedDirectories.union(sharingPackage.map { [$0.directory] } ?? []).union(innerSharingPackage.map { [$0.directory] } ?? []))
         packages = packageLibrary.entries()
@@ -1761,6 +1768,13 @@ extension ShellHostModel {
         }
     }
 
+    /// Queue presentation only. The receive sheet still requires an explicit transfer action.
+    @discardableResult public func handleReceiveLink(_ url: URL) -> Bool {
+        guard let invitation = try? GamePackageReceiveLink.invitation(from: url) else { return false }
+        pendingReceiveLink = invitation.absoluteString
+        return true
+    }
+
     public func enqueueExternalPackage(_ url: URL) {
         guard url.isFileURL, url.pathExtension.lowercased() == "nxb" else { return }
         externalPackages.append((url, url.startAccessingSecurityScopedResource()))
@@ -1836,6 +1850,52 @@ extension ShellHostModel {
         reload()
     }
 
+    /// CLI import uses the same verification, compatibility, signing and activation
+    /// path as GUI import, but never replaces an installed title by default.
+    /// Progress is synchronous and ordered on the worker executing each stage.
+    public func importPackageFromCommandLine(_ url: URL, replaceExisting: Bool = false, allowUntrusted: Bool = false,
+        progressBytes: (@Sendable (UInt64, UInt64) -> Void)? = nil,
+        progress: @escaping @Sendable (PackageImportStage) -> Void = { _ in }
+    ) async throws -> GamePackageLibrary.Entry {
+        await signingCheckTask?.value
+        try Task.checkCancellation()
+        guard url.isFileURL else { throw PackageCommandLineImportError.input }
+        guard canPreparePackage else { throw PackageCommandLineImportError.busy }
+        importingPackage = true
+        defer { importingPackage = false }
+        let library = packageLibrary
+        let preparation = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            progress(.readingAndVerifying)
+            do { return try library.prepare(url, allowUntrusted: allowUntrusted, progressBytes: progressBytes) }
+            catch is CancellationError { throw CancellationError() }
+            catch let error as GamePackageError {
+                if case .invalid(let reason) = error, ["unsigned package not allowed", "publisher is not trusted"].contains(reason) {
+                    throw PackageCommandLineImportError.untrusted
+                }
+                throw PackageCommandLineImportError.input
+            } catch { throw PackageCommandLineImportError.input }
+        }
+        let prepared = try await withTaskCancellationHandler {
+            try await preparation.value
+        } onCancel: { preparation.cancel() }
+        defer { library.discard(prepared) }
+        try Task.checkCancellation()
+        guard signingTeamID != nil, ShellSigningIdentityStore().hasIdentity else {
+            throw PackageCommandLineImportError.signingIdentity
+        }
+        guard let packageLauncher else { throw PackageCommandLineImportError.compatibility }
+        do { try packageLauncher.checkCompatibility(prepared.preview.manifest) }
+        catch { throw PackageCommandLineImportError.compatibility }
+        do {
+            let entry = try await installPackage(prepared, replaceExisting: replaceExisting, progress: progress)
+            reload()
+            return entry
+        } catch is CancellationError { throw CancellationError() }
+        catch GamePackageLibrary.InstallationError.alreadyInstalled { throw PackageCommandLineImportError.alreadyInstalled }
+        catch { throw PackageCommandLineImportError.installation }
+    }
+
     public func importPackage() async {
         guard let prepared = packagePreview, !importingPackage, !isGameRunning, !launchingGame, !resigningGame else { return }
         importingPackage = true
@@ -1847,18 +1907,25 @@ extension ShellHostModel {
         } catch { notice = error.localizedDescription }
     }
 
-    private func installPackage(_ prepared: GamePackageLibrary.Prepared) async throws {
+    @discardableResult private func installPackage(_ prepared: GamePackageLibrary.Prepared,
+        replaceExisting: Bool = true,
+        progress: @escaping @Sendable (PackageImportStage) -> Void = { _ in }
+    ) async throws -> GamePackageLibrary.Entry {
         guard let team = signingTeamID, ShellSigningIdentityStore().hasIdentity else {
             throw GamePackageError.invalid(hostText("Check your signing identity in Settings and unlock this device, then try again. The installed game was not changed."))
         }
         guard let packageLauncher else { throw GameLaunchError.notAvailable }
         try packageLauncher.checkCompatibility(prepared.preview.manifest)
         let library = packageLibrary
-        _ = try await Task.detached(priority: .userInitiated) {
-            try library.install(prepared, checkCompatibility: { _ in }) { executable in
+        let installation = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            return try library.install(prepared, replaceExisting: replaceExisting, progress: progress, checkCompatibility: { _ in }) { executable in
                 try ShellSigningIdentityStore().sign(library: executable, expectedTeamID: team)
             }
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await installation.value
+        } onCancel: { installation.cancel() }
     }
 
     private func playPackage(_ id: String) async {

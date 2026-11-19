@@ -53,6 +53,8 @@ git -C "$NXKIT_SOURCE" apply "$DM_SHELL_PACKAGE/GameRuntime/nxkit-runtime.patch"
 git -C "$NXKIT_SOURCE" apply "$DM_SHELL_PACKAGE/GameBuilder/nxkit-producer.patch"
 git -C "$NXKIT_SOURCE" add -f .
 export NXKIT_RUNTIME_REVISION=$(git -C "$NXKIT_SOURCE" write-tree)
+# Producer-only telemetry does not change the consumer runtime or the NXB format.
+git -C "$NXKIT_SOURCE" apply "$DM_SHELL_PACKAGE/GameBuilder/nxkit-progress.patch"
 export NXKIT_BUILDER_SOURCE="$S/GameBuilder"
 mkdir -p "$NXKIT_BUILDER_SOURCE/src" "$NXKIT_BUILDER_SOURCE/include"
 cp "$DM_SHELL_PACKAGE/GameBuilder/src/lib.rs" "$NXKIT_BUILDER_SOURCE/src/"
@@ -103,6 +105,9 @@ cargo rustc --manifest-path "$S/Native/Cargo.toml" --locked --release \
 mkdir -p "$S/Gen/dm" "$S/Gen/Assets.xcassets"
 printf '{"info":{"author":"xcode","version":1}}\n' > "$S/Gen/Assets.xcassets/Contents.json"
 ln -sfn "$ROOT/App" "$S/Shell"
+if [ "$SHELL_PLATFORM" = maccatalyst ]; then
+  install -m 755 "$ROOT/nx2apple.sh" "$S/Gen/nx2apple.sh"
+fi
 python3 -I - "$ROOT/project-shell.yml" "$S" <<'PY'
 import json, os, pathlib, re, sys
 source, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
@@ -136,6 +141,10 @@ text = text.replace('        CFBundleDisplayName:', '''        CFBundleDocumentT
 text = text.replace('        CFBundleDisplayName:', f'        NXKitRuntimeRevision: "{revision}"\n        NXKitRuntimeABI: {abi}\n        CFBundleDisplayName:')
 text = '\n'.join(line for line in text.splitlines() if '# @FRAMEWORKS@' not in line) + '\n'
 if os.environ['SHELL_PLATFORM'] == 'maccatalyst':
+    text = text.replace('      - path: Gen/Assets.xcassets',
+        '      - path: Gen/nx2apple.sh\n'
+        '        buildPhase: resources\n'
+        '      - path: Gen/Assets.xcassets')
     # Xcode resolves the default Keychain group from the selected signing profile.
     text = text.replace('    settings:\n',
         '    entitlements:\n'
@@ -163,7 +172,20 @@ xcodegen generate
 if [ "$MODE" != --prepare-xcode ]; then
   SIGNING=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=)
   if [ "$SHELL_PLATFORM" = maccatalyst ] && [ "$MODE" = --build ]; then
-    SIGNING=(CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES "CODE_SIGN_IDENTITY=$DM_SIGNING_IDENTITY")
+    # Automatic signing expects a certificate class for package dependencies.
+    # Verify the exact requested leaf before exporting the built app.
+    SIGNING=(CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES 'CODE_SIGN_IDENTITY=Apple Development' "DEVELOPMENT_TEAM=$DM_TEAM_ID")
+    EXPECTED_SIGNER=$(security find-identity -v -p codesigning | awk -v expected="$DM_SIGNING_IDENTITY" '
+      /"[^"]+"/ {
+        name = $0
+        sub(/^[^"]*"/, "", name)
+        sub(/".*$/, "", name)
+        if (name == expected || toupper($2) == toupper(expected)) print toupper($2)
+      }')
+    [[ "$EXPECTED_SIGNER" =~ ^[0-9A-F]{40}$ ]] || {
+      echo 'DM_SIGNING_IDENTITY must match exactly one valid local Apple Development identity.' >&2
+      exit 1
+    }
   fi
   xcodebuild -project DmShell.xcodeproj -scheme DmShell -configuration Release \
     -destination "$DESTINATION" -derivedDataPath "$S/dd" \
@@ -171,11 +193,23 @@ if [ "$MODE" != --prepare-xcode ]; then
     > "$S/build.log" 2>&1
   if [ "$SHELL_PLATFORM" = maccatalyst ]; then
     APP="$S/dd/Build/Products/Release-maccatalyst/DmShell.app"
+    [ -r "$APP/Contents/Resources/nx2apple.sh" ] || { echo 'Missing bundled CLI script.' >&2; exit 1; }
     if [ "$MODE" = --build-unsigned ]; then
       echo "Unsigned validation build only: $APP (not for installation or distribution)"
       exit 0
     fi
     codesign --verify --strict "$APP"
+    (
+      CHECK=$(mktemp -d "$S/signing-check.XXXXXX")
+      trap 'rm -rf "$CHECK"' EXIT
+      cd "$CHECK"
+      codesign -d --extract-certificates "$APP"
+      ACTUAL_SIGNER=$(shasum -a 1 codesign0 | awk '{print toupper($1)}')
+      [ "$ACTUAL_SIGNER" = "$EXPECTED_SIGNER" ] || {
+        echo 'The built app did not use the requested Apple Development identity.' >&2
+        exit 1
+      }
+    )
     ditto --norsrc "$APP" "$S/DmShell.app"
     echo "Signed Mac shell: $S/DmShell.app"
     echo 'Payload signing and loading still require validation on the target Mac.'

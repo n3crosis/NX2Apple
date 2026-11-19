@@ -466,8 +466,26 @@ static void metal_hud_per_layer(void) {
     fprintf(stderr, "shell: Metal's HUD is ready, each game's Performance HUD setting turns it on at Play\n");
 }
 
+#if TARGET_OS_MACCATALYST
+#include <readpassphrase.h>
+NSString *dm_shell_read_cli_password(void) {
+    char password[4098] = {0};
+    NSString *result = nil;
+    if (readpassphrase("P12 password (Return if empty): ", password, sizeof password, RPP_REQUIRE_TTY)
+        && strlen(password) <= 4096) {
+        result = [NSString stringWithUTF8String:password];
+    }
+    volatile unsigned char *wipe = (volatile unsigned char *)password;
+    for (size_t i = 0; i < sizeof password; ++i) wipe[i] = 0;
+    return result;
+}
+#endif
+
 int main(int argc, char **argv) {
     @autoreleasepool {
+#if TARGET_OS_MACCATALYST
+        [ShellCommandLine handleLaunch];
+#endif
         log_to([documents() stringByAppendingPathComponent:@"shell-log.txt"]);
         NSDictionary *info = NSBundle.mainBundle.infoDictionary;
         fprintf(stderr, "shell: %s %s, commit %s, shader chain %s, iOS %s\n", [info[@"CFBundleIdentifier"] UTF8String], [info[@"CFBundleShortVersionString"] UTF8String] ?: "?",

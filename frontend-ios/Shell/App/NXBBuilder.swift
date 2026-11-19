@@ -21,6 +21,19 @@ struct NXBBuilder {
         var minOS: String
     }
 
+    /// GUI and Terminal stamp packages with the same embedded runtime identity.
+    static func request(input: URL, keys: URL, updates: [URL] = [], dlc: [URL] = [],
+                        work: URL) throws -> Request {
+        let info = Bundle.main.infoDictionary ?? [:]
+        guard let revision = info["NXKitRuntimeRevision"] as? String,
+              let abiValue = info["NXKitRuntimeABI"] as? Int,
+              let abi = UInt32(exactly: abiValue), abi > 0 else { throw GameLaunchError.notAvailable }
+        return Request(input: input.path, keys: keys.path, work: work.path,
+                       output: work.appendingPathComponent("game.nxb").path,
+                       updates: updates.map(\.path), dlc: dlc.map(\.path),
+                       runtimeABI: abi, runtimeRevision: revision, minOS: "26.0")
+    }
+
     struct Failure: LocalizedError {
         let message: String
         var errorDescription: String? { message }
@@ -32,8 +45,28 @@ struct NXBBuilder {
         func cancel() { lock.lock(); cancelled = true; lock.unlock() }
         var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
         func checkCancellation() throws { if isCancelled { throw CancellationError() } }
-        let report: @Sendable (GameBuildProgress) -> Void
-        init(_ report: @escaping @Sendable (GameBuildProgress) -> Void) { self.report = report }
+        private let reportLock = NSLock()
+        private let sink: @Sendable (GameBuildProgress) -> Void
+        private var last: GameBuildProgress?
+        private var lastTime = -Double.infinity
+        init(_ report: @escaping @Sendable (GameBuildProgress) -> Void) { sink = report }
+        func report(_ event: GameBuildProgress) {
+            reportLock.lock()
+            defer { reportLock.unlock() }
+            lock.lock()
+            let changedStep = last?.stage != event.stage || last?.detail != event.detail
+            let changedCount = last?.completedFiles != event.completedFiles || last?.totalFiles != event.totalFiles
+            let now = ProcessInfo.processInfo.systemUptime
+            let finished = event.totalFiles != nil && event.completedFiles == event.totalFiles
+            let reset = event.totalFiles != last?.totalFiles || (event.completedFiles ?? 0) < (last?.completedFiles ?? 0)
+            guard changedStep || (changedCount && (finished || reset || now - lastTime >= 0.25)) else {
+                lock.unlock(); return
+            }
+            last = event
+            lastTime = now
+            lock.unlock()
+            sink(event)
+        }
     }
 
     private struct CompletedBuild: Codable {
@@ -119,7 +152,7 @@ struct NXBBuilder {
                             guard let stage, let context else { return 0 }
                             let callback = Unmanaged<ProgressCallback>.fromOpaque(context).takeUnretainedValue()
                             guard !callback.isCancelled else { return 0 }
-                            callback.report(GameBuildProgress(stage: String(cString: stage), message: ""))
+                            callback.report(GameBuildProgress(nativeStage: String(cString: stage)))
                             return 1
                         }, context)
                     }

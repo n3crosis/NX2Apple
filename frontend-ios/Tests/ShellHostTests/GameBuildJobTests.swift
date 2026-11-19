@@ -17,6 +17,28 @@ final class GameBuildJobTests: XCTestCase {
         }
     }
 
+    func testNativeDetailProgressIsAllowlistedAndValidated() {
+        let event = GameBuildProgress(nativeStage: "shaders.compile:12:40")
+        XCTAssertEqual(event.stage, "shaders")
+        XCTAssertEqual(event.detail, "compile")
+        XCTAssertEqual(event.detailLabel, "Compiling shader jobs")
+        XCTAssertEqual(event.completedFiles, 12)
+        XCTAssertEqual(event.totalFiles, 40)
+        let unknown = GameBuildProgress(nativeStage: "shaders.compile")
+        XCTAssertNil(unknown.totalFiles)
+        for value in ["", "/private/path:1:5", "shaders./secret:1:4", "shaders.compile:5:4",
+                      "shaders.compile:-1:4", "shaders.compile:1:0", "shaders.compile:1:999999999999999999999",
+                      "shaders.compile:1:4:secret", "shaders.compile: 1:4"] {
+            let parsed = GameBuildProgress(nativeStage: value)
+            XCTAssertNil(parsed.totalFiles)
+            XCTAssertFalse(parsed.stage.contains("/"))
+            XCTAssertFalse(parsed.detail?.contains("/") == true)
+        }
+        let legacy = GameBuildProgress(nativeStage: "shaders")
+        XCTAssertEqual(legacy.stage, "shaders")
+        XCTAssertNil(legacy.detail)
+    }
+
     func testProgressLogRecordsStageAndCountsWithoutNativePathsOrCredentials() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -40,6 +62,15 @@ final class GameBuildJobTests: XCTestCase {
         let restored = try GameBuildJob.load(in: root.appendingPathComponent("job"))
         XCTAssertEqual(restored.logs, job.logs)
         XCTAssertEqual(restored.stage, "shaders")
+        job.record(GameBuildProgress(nativeStage: "shaders.compile:2:3"), label: "Compiling shaders")
+        let encoded = try JSONEncoder().encode(job)
+        var old = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        old.removeValue(forKey: "detail")
+        let legacy = try JSONDecoder().decode(GameBuildJob.self, from: JSONSerialization.data(withJSONObject: old))
+        XCTAssertNil(legacy.detail)
+        let detailed = try JSONDecoder().decode(GameBuildJob.self, from: encoded)
+        XCTAssertEqual(detailed.detail, "compile")
+        XCTAssertEqual(detailed.completedFiles, 2)
     }
 
     func testStaleWindowCannotResumeOrDiscardReplacementJob() throws {

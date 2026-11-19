@@ -72,35 +72,17 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
     }
 
     @MainActor @objc(makeControllerWithInitialURL:) static func makeController(initialURL: URL?) -> UIViewController {
-        let info = Bundle.main.infoDictionary ?? [:]
-        // The shader chain the host was compiled with (build_shell.sh writes DMChain): a framework built for another one needs an app update
-        let chain = (info["DMChain"] as? String).map { "b-" + $0 }
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
         let glueVer = Int(DM_SHELL_GLUE_VERSION)
         Task.detached(priority: .utility) {
             ShellHostBeacon.write(to: documents, glueVersion: glueVer)
         }
-        let frameworks = Bundle.main.privateFrameworksURL ?? Bundle.main.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
-        let config = ShellHostConfig(
-            gamesRoot: frameworks,
-            appDataRoot: ShellHostConfig.defaultAppDataRoot(),
-            hotFrameworksRoot: ShellHostConfig.defaultHotFrameworksRoot(),
-            environment: HostEnvironment(chain: chain),
-            updateURL: URL(string: "https://github.com/LNPANDY/NX2Apple/releases"),
-            activeRunningGameID: {
-                dm_shell_active_game_id().map { String(cString: $0) }
-            },
-            requestStopRunningGame: {
-                dm_shell_request_stop_game()
-            }
-        )
         #if canImport(GameRuntime)
         let packageLauncher: (any GamePackageLauncher)? = NXKitGameLauncher.shared
         #else
         let packageLauncher: (any GamePackageLauncher)? = nil
         #endif
-        let model = ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker(),
-                                  packageLauncher: packageLauncher)
+        let model = makeModel(packageLauncher: packageLauncher)
         activeModel = model
         model.startControllers()
         for entry in model.entries {
@@ -121,15 +103,10 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
         let buildGame: GamePackageBuild?
         if NXKitGameLauncher.shared != nil {
             buildGame = { input, keys, updates, dlc, work, onProgress in
-                guard let revision = info["NXKitRuntimeRevision"] as? String,
-                      let abiValue = info["NXKitRuntimeABI"] as? Int,
-                      let abi = UInt32(exactly: abiValue), abi > 0 else { throw GameLaunchError.notAvailable }
+                let request = try NXBBuilder.request(input: input, keys: keys, updates: updates, dlc: dlc, work: work)
                 let idleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
                 UIApplication.shared.isIdleTimerDisabled = true
                 defer { UIApplication.shared.isIdleTimerDisabled = idleTimerDisabled }
-                let request = NXBBuilder.Request(input: input.path, keys: keys.path, work: work.path,
-                    output: work.appendingPathComponent("game.nxb").path, updates: updates.map(\.path), dlc: dlc.map(\.path),
-                    runtimeABI: abi, runtimeRevision: revision, minOS: "26.0")
                 return try await NXBBuilder.prepare(request, onProgress: onProgress)
             }
         } else {
@@ -148,6 +125,30 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
         return host
     }
 
+    @MainActor static func makeModel(packageLauncher: (any GamePackageLauncher)?, commandLineMode: Bool = false) -> ShellHostModel {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let chain = (info["DMChain"] as? String).map { "b-" + $0 }
+        let frameworks = Bundle.main.privateFrameworksURL ?? Bundle.main.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
+        let config = ShellHostConfig(
+            gamesRoot: frameworks,
+            appDataRoot: ShellHostConfig.defaultAppDataRoot(),
+            hotFrameworksRoot: ShellHostConfig.defaultHotFrameworksRoot(),
+            environment: HostEnvironment(chain: chain),
+            updateURL: URL(string: "https://github.com/LNPANDY/NX2Apple/releases"),
+            activeRunningGameID: {
+                dm_shell_active_game_id().map { String(cString: $0) }
+            },
+            requestStopRunningGame: {
+                dm_shell_request_stop_game()
+            }
+        )
+        if commandLineMode {
+            return ShellHostModel(config: config, packageLauncher: packageLauncher, commandLineMode: true)
+        }
+        return ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker(),
+                              packageLauncher: packageLauncher)
+    }
+
     @MainActor @objc(handleOpenURL:) static func handleOpenURL(_ url: URL) -> Bool {
         let isPackage = url.isFileURL && url.pathExtension.lowercased() == "nxb"
         if let activeModel {
@@ -155,9 +156,11 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
                 activeModel.enqueueExternalPackage(url)
                 return true
             }
+            if activeModel.handleReceiveLink(url) { return true }
             return activeModel.handleDeepLink(url)
         }
-        guard isPackage || DeepLinkRouter.isLaunchURL(url) else { return false }
+        guard isPackage || DeepLinkRouter.isLaunchURL(url) ||
+                (try? GamePackageReceiveLink.invitation(from: url)) != nil else { return false }
         pendingOpenURL = url
         return true
     }

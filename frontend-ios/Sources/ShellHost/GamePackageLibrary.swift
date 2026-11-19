@@ -6,6 +6,7 @@ import Darwin
 /// Imported NXB games are independent of legacy framework bundles. Game assets
 /// are stored once; only the executable keeps a transport and a locally signed copy.
 public struct GamePackageLibrary: Sendable {
+    public enum InstallationError: Error { case alreadyInstalled }
     private static let activationLock = NSRecursiveLock()
     // Protected by activationLock, including prune/remove in other windows.
     nonisolated(unsafe) private static var sharingDirectories: [URL: Int] = [:]
@@ -41,7 +42,7 @@ public struct GamePackageLibrary: Sendable {
     public let root: URL
     public init(root: URL) { self.root = root }
 
-    public func prepare(_ source: URL) throws -> Prepared {
+    public func prepare(_ source: URL, allowUntrusted: Bool = true, progressBytes: ((UInt64, UInt64) -> Void)? = nil) throws -> Prepared {
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         let access = source.startAccessingSecurityScopedResource()
@@ -50,8 +51,8 @@ public struct GamePackageLibrary: Sendable {
         var result: Result<Prepared, Error>?
         NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: source, options: [], error: &coordinationError) { readable in
             result = Result {
-                let staged = try GamePackage.stage(readable, in: root, allowUnsigned: true,
-                    verifyPublisher: Self.verifyPublisher, allowUnknownPublisher: true) { _ in }
+                let staged = try GamePackage.stage(readable, in: root, allowUnsigned: allowUntrusted,
+                    verifyPublisher: Self.verifyPublisher, allowUnknownPublisher: allowUntrusted, progressBytes: progressBytes) { _ in }
                 return Prepared(id: UUID(), directory: staged.directory, preview: staged.preview)
             }
         }
@@ -99,6 +100,8 @@ public struct GamePackageLibrary: Sendable {
     /// The staged files become the installed generation by rename, not copying.
     /// A failed replacement leaves the active generation and saves untouched.
     public func install(_ prepared: Prepared,
+                        replaceExisting: Bool = true,
+                        progress: (PackageImportStage) -> Void = { _ in },
                         checkCompatibility: (GamePackageManifest) throws -> Void,
                         sign: (URL) throws -> Void) throws -> Entry {
         let fm = FileManager.default
@@ -109,21 +112,53 @@ public struct GamePackageLibrary: Sendable {
             throw GamePackageError.invalid("package changed since preview")
         }
         try checkCompatibility(verified.manifest)
+        let titleRoot = root.appendingPathComponent(verified.manifest.titleID, isDirectory: true)
+        if !replaceExisting && fm.fileExists(atPath: titleRoot.appendingPathComponent("active").path) {
+            throw InstallationError.alreadyInstalled
+        }
         let executable = prepared.directory.appendingPathComponent("run/nxgame.dylib")
         let original = prepared.directory.appendingPathComponent("original.dylib")
         if fm.fileExists(atPath: original.path) {
             if fm.fileExists(atPath: executable.path) { try fm.removeItem(at: executable) }
             try Self.cloneOrCopy(original, to: executable)
         } else { try Self.cloneOrCopy(executable, to: original) }
+        try Task.checkCancellation()
+        progress(.signing)
         try sign(executable)
-        let titleRoot = root.appendingPathComponent(verified.manifest.titleID, isDirectory: true)
-        try fm.createDirectory(at: titleRoot, withIntermediateDirectories: true)
+        try Task.checkCancellation()
         let generation = UUID().uuidString.lowercased()
         let destination = titleRoot.appendingPathComponent(generation, isDirectory: true)
         Self.activationLock.lock()
         defer { Self.activationLock.unlock() }
+        try fm.createDirectory(at: titleRoot, withIntermediateDirectories: true)
+        let active = titleRoot.appendingPathComponent("active")
+        if !replaceExisting && fm.fileExists(atPath: active.path) {
+            throw InstallationError.alreadyInstalled
+        }
+        try Task.checkCancellation()
+        progress(.installing)
         try fm.moveItem(at: prepared.directory, to: destination)
-        do { try Data(generation.utf8).write(to: titleRoot.appendingPathComponent("active"), options: .atomic) }
+        do {
+            try Task.checkCancellation()
+            if replaceExisting {
+                try Data(generation.utf8).write(to: active, options: .atomic)
+            } else {
+                // Publish a complete pointer without replacing an existing name,
+                // even if another process installed the title after our check.
+                let pointer = titleRoot.appendingPathComponent(".active-" + UUID().uuidString)
+                defer { try? fm.removeItem(at: pointer) }
+                try Data(generation.utf8).write(to: pointer, options: .withoutOverwriting)
+                do { try fm.linkItem(at: pointer, to: active) }
+                catch {
+                    let failure = error as NSError
+                    if (failure.domain == NSCocoaErrorDomain && failure.code == NSFileWriteFileExistsError) ||
+                        (failure.domain == NSPOSIXErrorDomain && failure.code == Int(EEXIST)) {
+                        throw InstallationError.alreadyInstalled
+                    }
+                    throw error
+                }
+            }
+        }
         catch {
             try? fm.moveItem(at: destination, to: prepared.directory)
             throw error
@@ -145,6 +180,20 @@ public struct GamePackageLibrary: Sendable {
                   fm.fileExists(atPath: directory.appendingPathComponent("run/nxgame.dylib").path) else { return nil }
             return Entry(manifest: manifest, directory: directory)
         }.sorted { $0.manifest.name.localizedStandardCompare($1.manifest.name) == .orderedAscending }
+    }
+
+    /// Uses the installed transport bytes rather than the locally signed copy.
+    public func exportForSharing(_ entry: Entry, to output: URL, progress: ((Int, Int) -> Void)? = nil) throws {
+        Self.retainSharing(entry.directory)
+        defer { Self.releaseSharing(entry.directory) }
+        func sign(_ manifest: Data) throws -> Data {
+            try ShellSigningIdentityStore().signPackageManifest(manifest)
+        }
+        if FileManager.default.fileExists(atPath: entry.archive.path) {
+            try GamePackage.exportSigned(entry.archive, to: output, progress: progress, signManifest: sign)
+        } else {
+            try GamePackage.exportDirectory(entry.directory, to: output, progress: progress, signManifest: sign)
+        }
     }
 
     /// Keep only active or still-loaded generations. A removed loaded package

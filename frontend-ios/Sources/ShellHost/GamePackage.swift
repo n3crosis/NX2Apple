@@ -130,6 +130,72 @@ public enum GamePackage {
                        manifestSHA256: SHA256.hash(data: rawManifest).map { String(format: "%02x", $0) }.joined())
     }
 
+    /// Read-only full integrity verification. Publisher trust and runtime
+    /// compatibility remain caller decisions, just as for inspect().
+    public static func verifyArchive(_ archive: URL, verifyPublisher: VerifyPublisher? = nil,
+                                     progressBytes: ((UInt64, UInt64) -> Void)? = nil) throws -> Preview {
+        try Task.checkCancellation()
+        let reader = try NXBArchive.Reader(archive)
+        defer { try? reader.input.close() }
+        let (manifest, raw, publisher) = try metadata(reader, verifyPublisher: verifyPublisher)
+        let total = manifest.files.reduce(UInt64(0)) { $0 + $1.bytes }
+        var completed: UInt64 = 0
+        var reported: UInt64 = 0
+        var gameData = Data()
+        var cover: Data?
+        progressBytes?(0, total)
+        for file in manifest.files {
+            let isGame = file.path == "run/game.json"
+            let isCover = file.path == "run/icon.jpg" && file.bytes <= 4 << 20
+            if isCover { cover = Data() }
+            try streamVerifiedFile(file, reader: reader) { bytes in
+                if isGame { gameData.append(bytes) }
+                if isCover { cover?.append(bytes) }
+                completed += UInt64(bytes.count)
+                if completed < total && completed - reported >= 8 * 1024 * 1024 {
+                    progressBytes?(completed, total)
+                    reported = completed
+                }
+            }
+        }
+        try validateGameIdentity(gameData, manifest: manifest)
+        try Task.checkCancellation()
+        progressBytes?(completed, total)
+        return Preview(manifest: manifest, publisher: publisher, cover: cover,
+                       manifestSHA256: SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined())
+    }
+
+    /// Shared by read-only verification and extraction: identical byte bounds,
+    /// cancellation points and checksums, with no whole-payload allocation.
+    private static func streamVerifiedFile(_ file: GamePackageManifest.File, reader: NXBArchive.Reader,
+                                           consume: (Data) throws -> Void) throws {
+        try Task.checkCancellation()
+        guard let entry = reader.entries[file.path] else { throw GamePackageError.invalid("file inventory mismatch") }
+        var remaining = entry.bytes, position = entry.start
+        var hash = SHA256()
+        var crc: UInt32 = 0xffffffff
+        while remaining > 0 {
+            try Task.checkCancellation()
+            let bytes = try reader.read(position, Int(min(remaining, UInt64(NXBArchive.chunk))))
+            hash.update(data: bytes)
+            crc = NXBArchive.updateCRC(crc, bytes)
+            try consume(bytes)
+            remaining -= UInt64(bytes.count)
+            position += UInt64(bytes.count)
+        }
+        guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == file.sha256,
+              crc ^ 0xffffffff == entry.crc else { throw GamePackageError.invalid("file checksum mismatch") }
+    }
+
+    private static func validateGameIdentity(_ data: Data, manifest: GamePackageManifest) throws {
+        guard let game = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              game["title_id"] as? String == manifest.titleID,
+              game["name"] as? String == manifest.name,
+              game["dylib"] as? String == "nxgame.dylib" else {
+            throw GamePackageError.invalid("game identity does not match package metadata")
+        }
+    }
+
     private static func metadata(_ reader: NXBArchive.Reader, verifyPublisher: VerifyPublisher?) throws
         -> (GamePackageManifest, Data, GamePackagePublisher?) {
         func metadata(_ name: String, limit: Int) throws -> Data {
@@ -166,6 +232,7 @@ public enum GamePackage {
                                     verifyPublisher: @escaping VerifyPublisher = {
                                         try GamePackageSignature.verify(manifest: $0, proof: $1)
                                     },
+                                    progress: ((Int, Int) -> Void)? = nil,
                                     signManifest: (Data) throws -> Data) throws {
         let reader = try NXBArchive.Reader(archive)
         defer { try? reader.input.close() }
@@ -179,12 +246,15 @@ public enum GamePackage {
             throw GamePackageError.invalid("cannot create export")
         }
         defer { try? fm.removeItem(at: temporary) }
-        try NXBArchive.write(temporary, reader: reader, files: manifest.files, manifest: raw, proof: proof)
+        try NXBArchive.write(temporary, reader: reader, files: manifest.files, manifest: raw, proof: proof,
+                             progress: progress)
+        try Task.checkCancellation()
         try fm.moveItem(at: temporary, to: output)
     }
 
     public static func stage(_ archive: URL, in parent: URL, allowUnsigned: Bool,
                              verifyPublisher: VerifyPublisher? = nil, allowUnknownPublisher: Bool = false,
+                             progressBytes: ((UInt64, UInt64) -> Void)? = nil,
                              checkCompatibility: (GamePackageManifest) throws -> Void) throws
         -> (manifest: GamePackageManifest, directory: URL, publisher: GamePackagePublisher?, preview: Preview) {
         let reader = try NXBArchive.Reader(archive)
@@ -207,9 +277,12 @@ public enum GamePackage {
                                attributes: [.posixPermissions: 0o700])
         var complete = false
         defer { if !complete { try? fm.removeItem(at: directory) } }
+        let total = manifest.files.reduce(UInt64(0)) { $0 + $1.bytes }
+        var copied: UInt64 = 0
+        var reported: UInt64 = 0
+        progressBytes?(0, total)
         for file in manifest.files {
             try Task.checkCancellation()
-            let entry = reader.entries[file.path]!
             let url = directory.appendingPathComponent(file.path)
             try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             guard fm.createFile(atPath: url.path, contents: nil) else {
@@ -217,32 +290,20 @@ public enum GamePackage {
             }
             let output = try FileHandle(forWritingTo: url)
             do {
-                var remaining = entry.bytes, position = entry.start
-                var hash = SHA256()
-                var crc: UInt32 = 0xffffffff
-                while remaining > 0 {
-                    try Task.checkCancellation()
-                    let bytes = try reader.read(position, Int(min(remaining, UInt64(NXBArchive.chunk))))
-                    hash.update(data: bytes)
-                    crc = NXBArchive.updateCRC(crc, bytes)
+                try streamVerifiedFile(file, reader: reader) { bytes in
                     try output.write(contentsOf: bytes)
-                    remaining -= UInt64(bytes.count); position += UInt64(bytes.count)
+                    copied += UInt64(bytes.count)
+                    if copied < total && copied - reported >= 8 * 1024 * 1024 {
+                        progressBytes?(copied, total)
+                        reported = copied
+                    }
                 }
                 try output.close()
-                guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == file.sha256,
-                      crc ^ 0xffffffff == entry.crc else {
-                    throw GamePackageError.invalid("file checksum mismatch")
-                }
                 try fm.setAttributes([.posixPermissions: file.executable ? 0o755 : 0o644], ofItemAtPath: url.path)
             } catch { try? output.close(); throw error }
         }
         let gameData = try Data(contentsOf: directory.appendingPathComponent("run/game.json"))
-        guard let game = try JSONSerialization.jsonObject(with: gameData) as? [String: Any],
-              game["title_id"] as? String == manifest.titleID,
-              game["name"] as? String == manifest.name,
-              game["dylib"] as? String == "nxgame.dylib" else {
-            throw GamePackageError.invalid("game identity does not match package metadata")
-        }
+        try validateGameIdentity(gameData, manifest: manifest)
         try rawManifest.write(to: directory.appendingPathComponent(GamePackageManifest.fileName))
         if let proof = reader.entries["nxb.signature.json"] {
             try reader.read(proof.start, Int(proof.bytes)).write(to: directory.appendingPathComponent("nxb.signature.json"))
@@ -253,6 +314,7 @@ public enum GamePackage {
         }
         let preview = Preview(manifest: manifest, publisher: publisher, cover: cover,
                               manifestSHA256: SHA256.hash(data: rawManifest).map { String(format: "%02x", $0) }.joined())
+        progressBytes?(copied, total)
         complete = true
         return (manifest, directory, publisher, preview)
     }
@@ -349,7 +411,7 @@ public enum GamePackage {
     /// Streams a new NXB from installed immutable assets, with no temporary archive.
     /// An explicit file export can supply a FileHandle as the sink instead.
     static func streamDirectory(_ directory: URL, proof: Data? = nil,
-                                emit: (Data) throws -> Void) throws {
+                                progress: ((Int, Int) -> Void)? = nil, emit: (Data) throws -> Void) throws {
         var entries: [String: NXBArchive.Entry] = [:]
         let preview = try inspectDirectory(directory) { file, crc in
             entries[file.path] = NXBArchive.Entry(path: file.path, bytes: file.bytes, crc: crc, start: 0, end: file.bytes)
@@ -361,7 +423,7 @@ public enum GamePackage {
         let sources = Dictionary(uniqueKeysWithValues: preview.manifest.files.map { ($0.path, transportFile($0, in: directory)) })
         var input: FileHandle?, currentPath: String?
         defer { try? input?.close() }
-        try NXBArchive.write(entries: entries, files: preview.manifest.files, manifest: raw, proof: signature,
+        try NXBArchive.write(entries: entries, files: preview.manifest.files, manifest: raw, proof: signature, progress: progress,
             read: { path, offset, count in
                 if currentPath != path {
                     try input?.close()
@@ -373,7 +435,8 @@ public enum GamePackage {
             }, emit: emit)
     }
 
-    static func exportDirectory(_ directory: URL, to output: URL, signManifest: (Data) throws -> Data) throws {
+    static func exportDirectory(_ directory: URL, to output: URL, progress: ((Int, Int) -> Void)? = nil,
+                                signManifest: (Data) throws -> Data) throws {
         let raw = try Data(contentsOf: directory.appendingPathComponent(GamePackageManifest.fileName))
         let proof = try signManifest(raw)
         let temporary = output.deletingLastPathComponent().appendingPathComponent(".nxb-export-" + UUID().uuidString)
@@ -383,7 +446,7 @@ public enum GamePackage {
         defer { try? FileManager.default.removeItem(at: temporary) }
         let handle = try FileHandle(forWritingTo: temporary)
         do {
-            try streamDirectory(directory, proof: proof) { try handle.write(contentsOf: $0) }
+            try streamDirectory(directory, proof: proof, progress: progress) { try handle.write(contentsOf: $0) }
             try handle.synchronize(); try handle.close()
             try FileManager.default.moveItem(at: temporary, to: output)
         } catch { try? handle.close(); throw error }

@@ -103,6 +103,12 @@ struct GamePackageReceiveView: View {
     @State private var scanning = false
     @State private var allowInternet = false
 
+    init(model: ShellHostModel, initialLink: String = "", close: @escaping () -> Void) {
+        self.model = model
+        self.close = close
+        _link = State(initialValue: initialLink)
+    }
+
     private var internetLink: Bool {
         URL(string: link.trimmingCharacters(in: .whitespacesAndNewlines))?.scheme == "https"
     }
@@ -184,7 +190,14 @@ struct GamePackageReceiveView: View {
         #if os(iOS) && !targetEnvironment(macCatalyst)
         .sheet(isPresented: $scanning) {
             NavigationStack {
-                GameShareScanner { value in link = value; scanning = false }
+                GameShareScanner { value in
+                    if let url = URL(string: value), let invitation = try? GamePackageReceiveLink.invitation(from: url) {
+                        link = invitation.absoluteString
+                    } else {
+                        link = value
+                    }
+                    scanning = false
+                }
                     .ignoresSafeArea(edges: .bottom)
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button(hostText("Cancel")) { scanning = false } } }
             }

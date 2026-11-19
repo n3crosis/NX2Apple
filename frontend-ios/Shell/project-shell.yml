@@ -83,6 +83,7 @@ targets:
               - UISceneConfigurationName: Default
                 UISceneDelegateClassName: SceneDelegate
     settings:
+      "OTHER_LDFLAGS[sdk=macosx*]": "$(inherited) -lcurl" # Catalyst CLI HTTPS only
       PRODUCT_BUNDLE_IDENTIFIER: ${DM_BUNDLE_ID}
       PRODUCT_NAME: DmShell
       PRODUCT_MODULE_NAME: DmShell   # ShellMain.m imports DmShell-Swift.h
