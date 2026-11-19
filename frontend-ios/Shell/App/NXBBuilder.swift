@@ -53,18 +53,14 @@ struct NXBBuilder {
         func report(_ event: GameBuildProgress) {
             reportLock.lock()
             defer { reportLock.unlock() }
-            lock.lock()
             let changedStep = last?.stage != event.stage || last?.detail != event.detail
             let changedCount = last?.completedFiles != event.completedFiles || last?.totalFiles != event.totalFiles
             let now = ProcessInfo.processInfo.systemUptime
             let finished = event.totalFiles != nil && event.completedFiles == event.totalFiles
             let reset = event.totalFiles != last?.totalFiles || (event.completedFiles ?? 0) < (last?.completedFiles ?? 0)
-            guard changedStep || (changedCount && (finished || reset || now - lastTime >= 0.25)) else {
-                lock.unlock(); return
-            }
+            guard changedStep || (changedCount && (finished || reset || now - lastTime >= 0.25)) else { return }
             last = event
             lastTime = now
-            lock.unlock()
             sink(event)
         }
     }

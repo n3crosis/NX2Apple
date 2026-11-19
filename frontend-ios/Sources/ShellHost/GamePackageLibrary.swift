@@ -63,13 +63,13 @@ public struct GamePackageLibrary: Sendable {
 
     /// A network receiver writes directly into a private staging directory under
     /// this library. Verification precedes preview and activation; no ZIP is retained.
-    public func prepareDirectory(_ directory: URL) throws -> Prepared {
+    public func prepareDirectory(_ directory: URL, progressBytes: ((UInt64, UInt64) -> Void)? = nil) throws -> Prepared {
         guard directory.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL,
               directory.lastPathComponent.hasPrefix(".nxb-"),
               try FileManager.default.attributesOfItem(atPath: directory.path)[.type] as? FileAttributeType == .typeDirectory else {
             throw GamePackageError.invalid("invalid staging directory")
         }
-        return Prepared(id: UUID(), directory: directory, preview: try GamePackage.inspectDirectory(directory))
+        return Prepared(id: UUID(), directory: directory, preview: try GamePackage.inspectDirectory(directory, progressBytes: progressBytes))
     }
 
     /// Old installations still have original.nxb. New ones retain just the

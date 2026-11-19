@@ -5,7 +5,7 @@ Use the signed Catalyst `DmShell.app` from the checkout under test. The bundled 
 On an approved Mac, quit the GUI app before using these commands. They share the same library and signing storage. Use a test library and an unlocked login session. Define the Terminal command:
 
 ```sh
-bundle="/Applications/DmShell.app"
+bundle="/Applications/NX2Apple.app"  # Use the actual path for an unpacked DmShell.app.
 cli() { /bin/sh "$bundle/Contents/Resources/nx2apple.sh" "$@"; }
 cli --help
 ```
@@ -70,4 +70,4 @@ cli receive - --json < "/path/to/private-invitation.txt"
 
 `status` reports whether the saved signing identity is valid, whether the build keys are accessible, and which runtime is embedded. It does not print secrets or paths. `inspect` reads package metadata, while `verify` reads and hashes the payload without installing. Verification reports trust and compatibility separately. With `--require-compatible`, it returns nonzero when this runtime cannot load the package. An unsigned or unknown publisher is not described as trusted just because its payload matches its manifest.
 
-`receive` accepts a pasteable invitation or an NX2Apple receive link. Using `-` with a pipe or redirected private file keeps the link out of process arguments. Add `--external` only for an internet link. An unknown or unsigned publisher requires `--allow-untrusted`; only use it for a known source. No existing title is replaced. Ctrl-C stops a long operation at a safe boundary. JSON events go to stdout.
+`receive` accepts a pasteable invitation or an NX2Apple receive link. Using `-` with a pipe or redirected private file keeps the link out of process arguments. Add `--external` only for an internet link. Publisher trust and runtime compatibility are checked before downloading the payload. An unknown or unsigned publisher requires `--allow-untrusted`; only use it for a known source. Received files are verified and installed directly without creating an intermediate NXB. No existing title is replaced. Ctrl-C stops a long operation at a safe boundary. JSON events go to stdout.

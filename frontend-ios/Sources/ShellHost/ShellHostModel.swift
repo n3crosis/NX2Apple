@@ -1851,9 +1851,9 @@ extension ShellHostModel {
     }
 
     /// CLI import uses the same verification, compatibility, signing and activation
-    /// path as GUI import, but never replaces an installed title by default.
+    /// path as GUI import, but never replaces an installed title.
     /// Progress is synchronous and ordered on the worker executing each stage.
-    public func importPackageFromCommandLine(_ url: URL, replaceExisting: Bool = false, allowUntrusted: Bool = false,
+    public func importPackageFromCommandLine(_ url: URL, allowUntrusted: Bool = false,
         progressBytes: (@Sendable (UInt64, UInt64) -> Void)? = nil,
         progress: @escaping @Sendable (PackageImportStage) -> Void = { _ in }
     ) async throws -> GamePackageLibrary.Entry {
@@ -1880,6 +1880,45 @@ extension ShellHostModel {
             try await preparation.value
         } onCancel: { preparation.cancel() }
         defer { library.discard(prepared) }
+        return try await activateCommandLinePackage(prepared, progress: progress)
+    }
+
+    public func receivePackageFromCommandLine(_ invitation: URL, allowExternal: Bool, allowUntrusted: Bool,
+        remoteTransport: GamePackageShareClient.RemoteTransport?,
+        transferProgress: @escaping @Sendable (UInt64, UInt64) -> Void,
+        verificationProgress: @escaping @Sendable (UInt64, UInt64) -> Void,
+        progress: @escaping @Sendable (PackageImportStage) -> Void
+    ) async throws -> GamePackageLibrary.Entry {
+        await signingCheckTask?.value
+        try Task.checkCancellation()
+        guard canPreparePackage else { throw PackageCommandLineImportError.busy }
+        guard let packageLauncher else { throw PackageCommandLineImportError.compatibility }
+        importingPackage = true
+        defer { importingPackage = false }
+        let library = packageLibrary
+        let directory = try await ShellCommandLineReceive.fetch(invitation, in: library.root, allowExternal: allowExternal,
+            allowUntrusted: allowUntrusted, remoteTransport: remoteTransport, checkCompatibility: { manifest in
+                do { try await packageLauncher.checkCompatibility(manifest) }
+                catch { throw PackageCommandLineImportError.compatibility }
+            }, progress: transferProgress)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let preparation = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            progress(.readingAndVerifying)
+            do { return try library.prepareDirectory(directory, progressBytes: verificationProgress) }
+            catch is CancellationError { throw CancellationError() }
+            catch { throw PackageCommandLineImportError.input }
+        }
+        let prepared = try await withTaskCancellationHandler {
+            try await preparation.value
+        } onCancel: { preparation.cancel() }
+        guard allowUntrusted || prepared.preview.publisher?.trusted == true else { throw PackageCommandLineImportError.untrusted }
+        return try await activateCommandLinePackage(prepared, progress: progress)
+    }
+
+    private func activateCommandLinePackage(_ prepared: GamePackageLibrary.Prepared,
+        progress: @escaping @Sendable (PackageImportStage) -> Void
+    ) async throws -> GamePackageLibrary.Entry {
         try Task.checkCancellation()
         guard signingTeamID != nil, ShellSigningIdentityStore().hasIdentity else {
             throw PackageCommandLineImportError.signingIdentity
@@ -1888,9 +1927,7 @@ extension ShellHostModel {
         do { try packageLauncher.checkCompatibility(prepared.preview.manifest) }
         catch { throw PackageCommandLineImportError.compatibility }
         do {
-            let entry = try await installPackage(prepared, replaceExisting: replaceExisting, progress: progress)
-            reload()
-            return entry
+            return try await installPackage(prepared, replaceExisting: false, progress: progress)
         } catch is CancellationError { throw CancellationError() }
         catch GamePackageLibrary.InstallationError.alreadyInstalled { throw PackageCommandLineImportError.alreadyInstalled }
         catch { throw PackageCommandLineImportError.installation }
@@ -1962,6 +1999,7 @@ extension ShellHostModel {
     func signPackageForSharing(_ entry: GamePackageLibrary.Entry) async throws -> URL {
         // File export owns a lease independently of any active link server.
         GamePackageLibrary.retainSharing(entry.directory)
+        let library = packageLibrary
         let export = Task.detached(priority: .userInitiated) {
             defer { GamePackageLibrary.releaseSharing(entry.directory) }
             try Task.checkCancellation()
@@ -1969,15 +2007,7 @@ extension ShellHostModel {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let output = directory.appendingPathComponent(entry.id + ".nxb")
             do {
-                if FileManager.default.fileExists(atPath: entry.archive.path) {
-                    try GamePackage.exportSigned(entry.archive, to: output) {
-                        try ShellSigningIdentityStore().signPackageManifest($0)
-                    }
-                } else {
-                    try GamePackage.exportDirectory(entry.directory, to: output) {
-                        try ShellSigningIdentityStore().signPackageManifest($0)
-                    }
-                }
+                try library.exportForSharing(entry, to: output)
                 try Task.checkCancellation()
                 return output
             } catch {

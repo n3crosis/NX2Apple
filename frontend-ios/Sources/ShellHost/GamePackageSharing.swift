@@ -335,7 +335,7 @@ public actor GamePackageShareClient {
         return configuration
     }
 
-    public func preview() async throws -> GamePackage.Preview {
+    func manifestPreview() async throws -> GamePackage.Preview {
         if let metadata { return metadata.2 }
         let raw = try await get("metadata/manifest", maximum: NXBArchive.metadataLimit)
         let manifest = try JSONDecoder().decode(GamePackageManifest.self, from: raw)
@@ -343,6 +343,16 @@ public actor GamePackageShareClient {
         let proofBytes = try await get("metadata/proof", maximum: 64 << 10)
         let proof = proofBytes.isEmpty ? nil : proofBytes
         let publisher = try proof.map { try GamePackageSignature.verify(manifest: raw, proof: $0) }
+        let preview = GamePackage.Preview(manifest: manifest, publisher: publisher, cover: nil,
+            manifestSHA256: GamePackageShareServer.digest(raw))
+        metadata = (raw, proof, preview)
+        return preview
+    }
+
+    public func preview() async throws -> GamePackage.Preview {
+        let preview = try await manifestPreview()
+        guard preview.cover == nil, let (raw, proof, _) = metadata else { return preview }
+        let manifest = preview.manifest
         var cover: Data?
         if let index = manifest.files.firstIndex(where: { $0.path == "run/icon.jpg" && $0.bytes <= 4 << 20 }) {
             var data = Data()
@@ -355,20 +365,21 @@ public actor GamePackageShareClient {
             guard GamePackageShareServer.digest(data) == file.sha256 else { throw GamePackageError.invalid("shared cover checksum") }
             cover = data
         }
-        let preview = GamePackage.Preview(manifest: manifest, publisher: publisher, cover: cover,
-            manifestSHA256: GamePackageShareServer.digest(raw))
-        metadata = (raw, proof, preview)
-        return preview
+        guard let cover else { return preview }
+        let withCover = GamePackage.Preview(manifest: manifest, publisher: preview.publisher, cover: cover,
+            manifestSHA256: preview.manifestSHA256)
+        metadata = (raw, proof, withCover)
+        return withCover
     }
 
     /// Staging is private and cannot launch. Present the verified preview before
     /// asking the library to sign locally and activate this directory.
     public func receive(in root: URL, progress: @escaping @Sendable (UInt64, UInt64) -> Void) async throws -> URL {
-        _ = try await preview()
+        _ = try await manifestPreview()
         guard let (raw, proof, preview) = metadata else { throw GamePackageError.invalid("missing sharing metadata") }
         let directory = root.appendingPathComponent(".nxb-\(UUID().uuidString.lowercased())", isDirectory: true)
         let fm = FileManager.default
-        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         do {
             try raw.write(to: directory.appendingPathComponent("nxb.json"), options: .atomic)
             if let proof { try proof.write(to: directory.appendingPathComponent("nxb.signature.json"), options: .atomic) }
@@ -397,6 +408,7 @@ public actor GamePackageShareClient {
                         throw GamePackageError.invalid("shared file checksum mismatch")
                     }
                     try handle.close()
+                    try fm.setAttributes([.posixPermissions: file.executable ? 0o755 : 0o644], ofItemAtPath: destination.path)
                 } catch { try? handle.close(); throw error }
             }
             return directory

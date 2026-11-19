@@ -9,6 +9,8 @@ import ShellHost
 /// A foreground Terminal sharing session. Only requested stdout invitations
 /// contain credentials; diagnostic stderr and error events never include URLs.
 @MainActor enum CatalystShareCommand {
+    private static let lifetimeSeconds = 3600
+
     static func run(directory: URL, archive: URL? = nil, remote: Bool, json: Bool) async -> Int32 {
         let server: GamePackageShareServer
         if remote {
@@ -22,7 +24,7 @@ import ShellHost
             server = GamePackageShareServer()
         }
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(3600))
+        let deadline = clock.now.advanced(by: .seconds(lifetimeSeconds))
         do {
             try Task.checkCancellation()
             if remote {
@@ -33,7 +35,7 @@ import ShellHost
             let app = try GamePackageReceiveLink.appURL(for: plain)
             if json {
                 try emit(["event": "sharing", "url": plain.absoluteString, "appURL": app.absoluteString,
-                      "remote": remote, "maximumLifetimeSeconds": 3600])
+                      "remote": remote, "maximumLifetimeSeconds": lifetimeSeconds])
             } else {
                 try deliver("Share link:")
                 try deliver(plain.absoluteString)

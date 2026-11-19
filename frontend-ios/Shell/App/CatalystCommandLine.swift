@@ -359,7 +359,8 @@ import ShellHost
     }
 
     private static func receiveGame(_ input: String, external: Bool, allowUntrusted: Bool, reporter: Reporter) async -> Int32 {
-        guard runtimeAvailable else {
+        #if canImport(GameRuntime)
+        guard let runtime = NXKitGameLauncher.shared else {
             reporter.failure("runtime_unavailable", "The nxkit runtime is not available in this build.")
             return 1
         }
@@ -377,33 +378,28 @@ import ShellHost
             reporter.failure("invalid_invitation", "Paste a local or external NX2Apple sharing link.")
             return 64
         }
-        let fm = FileManager.default
-        let scratch = fm.temporaryDirectory.appendingPathComponent("nx2apple-receive-" + UUID().uuidString, isDirectory: true)
+        let model = ShellLibrary.makeModel(packageLauncher: runtime, commandLineMode: true)
         do {
-            try fm.createDirectory(at: scratch, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        } catch {
-            reporter.failure("workspace_unavailable", "The app could not create its temporary receive directory.")
-            return 1
-        }
-        defer { try? fm.removeItem(at: scratch) }
-        let archive: URL
-        do {
-            // The callback is ordered by the sharing client. Protect throttle
-            // state through the reporter rather than capturing mutable locals.
-            let progress = ReceiveProgress(reporter: reporter)
+            let progress = ReceiveProgress(reporter: reporter, stage: "receiving", label: "Receiving")
+            let verification = ReceiveProgress(reporter: reporter, stage: PackageImportStage.readingAndVerifying.rawValue, label: "Verifying")
             let https = CatalystHTTPSTransport()
-            archive = try await ShellCommandLineReceive.fetch(invitation, in: scratch, allowExternal: external,
-                                                              allowUntrusted: allowUntrusted, remoteTransport: { url, token, limit in
-                try await https.get(url, authorization: token, maximumBytes: limit)
-            }) {
-                progress.report($0, total: $1)
-            }
-            try Task.checkCancellation()
+            let entry = try await model.receivePackageFromCommandLine(invitation, allowExternal: external,
+                allowUntrusted: allowUntrusted, remoteTransport: { url, token, limit in
+                    try await https.get(url, authorization: token, maximumBytes: limit)
+                }, transferProgress: { progress.report($0, total: $1) },
+                verificationProgress: { verification.report($0, total: $1) },
+                progress: { reporter.progress($0) })
+            reporter.success(entry.id)
+            return 0
         } catch ShellCommandLineReceive.Failure.externalPermissionRequired {
             reporter.failure("external_permission_required", "Receiving an external link requires --external.")
             return 64
         } catch ShellCommandLineReceive.Failure.untrustedPackage {
             reporter.failure("untrusted_package", "The publisher is not trusted. Use --allow-untrusted only for a known source.")
+            return 1
+        } catch let error as PackageCommandLineImportError {
+            let (code, message) = Reporter.importFailure(error)
+            reporter.failure(code, message)
             return 1
         } catch is CancellationError {
             reporter.failure("cancelled", "Receive cancelled. No game was installed.")
@@ -416,7 +412,10 @@ import ShellHost
             reporter.failure("receive_failed", "Could not receive the package. Check the link and network connection.")
             return 1
         }
-        return await importGame(archive, allowUntrusted: allowUntrusted, reporter: reporter)
+        #else
+        reporter.failure("runtime_unavailable", "The nxkit runtime is not available in this build.")
+        return 1
+        #endif
     }
 
     private static func readInvitationLine() throws -> String {
@@ -439,15 +438,21 @@ import ShellHost
     private final class ReceiveProgress: @unchecked Sendable {
         private let lock = NSLock()
         private let reporter: Reporter
+        private let stage: String
+        private let label: String
         private var last: UInt64 = 0
 
-        init(reporter: Reporter) { self.reporter = reporter }
+        init(reporter: Reporter, stage: String, label: String) {
+            self.reporter = reporter
+            self.stage = stage
+            self.label = label
+        }
         func report(_ done: UInt64, total: UInt64) {
             lock.lock()
             defer { lock.unlock() }
             guard done > last, done - last >= 8 << 20 || done == total else { return }
             last = done
-            reporter.verifiedBytes(done, total: total, stage: "receiving", label: "Receiving")
+            reporter.verifiedBytes(done, total: total, stage: stage, label: label)
         }
     }
 
@@ -458,26 +463,12 @@ import ShellHost
             return 1
         }
         let fm = FileManager.default
-        var existing = stat()
-        if lstat(destination.path, &existing) == 0 {
-            reporter.failure("output_exists", "The output already exists. Choose a new NXB path.")
-            return 1
-        }
-        let stage = destination.deletingLastPathComponent()
-            .appendingPathComponent(".nx2apple-output-" + UUID().uuidString, isDirectory: true)
-        do {
-            try fm.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        } catch {
-            reporter.failure("output_unavailable", "The app cannot write to the output directory.")
-            return 1
-        }
-        defer { try? fm.removeItem(at: stage) }
-        let staged = stage.appendingPathComponent("game.nxb")
-        reporter.buildProgress(GameBuildProgress(stage: "signing", message: ""))
+        guard let staged = prepareOutput(at: destination, reporter: reporter) else { return 1 }
+        defer { try? fm.removeItem(at: staged.deletingLastPathComponent()) }
+        reporter.signingProgress()
         let export = Task.detached(priority: .userInitiated) {
             try library.exportForSharing(entry, to: staged) { done, total in
-                reporter.buildProgress(GameBuildProgress(stage: "signing", message: "",
-                                                         completedFiles: done, totalFiles: total, detail: "archive"))
+                reporter.signingProgress(done, total: total)
             }
         }
         do {
@@ -493,6 +484,26 @@ import ShellHost
         guard publish(staged, to: destination, reporter: reporter) else { return 1 }
         reporter.exported(id)
         return 0
+    }
+
+    private static func prepareOutput(at destination: URL, reporter: Reporter) -> URL? {
+        let outputStage = destination.deletingLastPathComponent()
+            .appendingPathComponent(".nx2apple-output-" + UUID().uuidString, isDirectory: true)
+        // Stage the finished archive in the destination directory so publishing
+        // uses an atomic, no-clobber link on the same filesystem.
+        var existing = stat()
+        if lstat(destination.path, &existing) == 0 {
+            reporter.failure("output_exists", "The output already exists. Choose a new NXB path.")
+            return nil
+        }
+        do {
+            try FileManager.default.createDirectory(at: outputStage, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+        } catch {
+            reporter.failure("output_unavailable", "The app cannot write to the output directory.")
+            return nil
+        }
+        return outputStage.appendingPathComponent("game.nxb")
     }
 
     private static func publish(_ staged: URL, to destination: URL, reporter: Reporter) -> Bool {
@@ -521,22 +532,8 @@ import ShellHost
         }
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appendingPathComponent("nx2apple-build-" + UUID().uuidString, isDirectory: true)
-        let outputStage = destination.deletingLastPathComponent()
-            .appendingPathComponent(".nx2apple-output-" + UUID().uuidString, isDirectory: true)
-        // Stage the finished archive in the destination directory so publishing
-        // uses an atomic, no-clobber link on the same filesystem.
-        var existing = stat()
-        if lstat(destination.path, &existing) == 0 {
-            reporter.failure("output_exists", "The output already exists. Choose a new NXB path.")
-            return 1
-        }
-        do { try fm.createDirectory(at: outputStage, withIntermediateDirectories: false,
-                                    attributes: [.posixPermissions: 0o700]) }
-        catch {
-            reporter.failure("output_unavailable", "The app cannot write to the output directory.")
-            return 1
-        }
-        defer { try? fm.removeItem(at: outputStage) }
+        guard let staged = prepareOutput(at: destination, reporter: reporter) else { return 1 }
+        defer { try? fm.removeItem(at: staged.deletingLastPathComponent()) }
         do {
             try fm.createDirectory(at: work, withIntermediateDirectories: false,
                                    attributes: [.posixPermissions: 0o700])
@@ -562,14 +559,12 @@ import ShellHost
             reporter.failure("build_failed", "Game build failed. Check the source game and prod.keys.")
             return 1
         }
-        reporter.buildProgress(GameBuildProgress(stage: "signing", message: ""))
-        let staged = outputStage.appendingPathComponent("game.nxb")
+        reporter.signingProgress()
         do {
             let export = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
                 try GamePackage.exportSigned(archive, to: staged, progress: { done, total in
-                    reporter.buildProgress(GameBuildProgress(stage: "signing", message: "",
-                                                            completedFiles: done, totalFiles: total, detail: "archive"))
+                    reporter.signingProgress(done, total: total)
                 }) {
                     try ShellSigningIdentityStore().signPackageManifest($0)
                 }
@@ -661,6 +656,11 @@ import ShellHost
                 let prefix = isatty(STDERR_FILENO) == 1 ? "\r\u{1B}[2K" : ""
                 ShellCommandLine.output(prefix + description + count, to: .standardError)
             }
+        }
+
+        func signingProgress(_ done: Int? = nil, total: Int? = nil) {
+            buildProgress(GameBuildProgress(stage: "signing", message: "",
+                                            completedFiles: done, totalFiles: total, detail: total == nil ? nil : "archive"))
         }
 
         func cancelledBuild() -> Int32 {

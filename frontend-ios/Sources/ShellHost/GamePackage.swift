@@ -329,6 +329,7 @@ public enum GamePackage {
     /// Verifies a received file set without first materializing a ZIP archive.
     /// The same path is used before forwarding installed game data to another device.
     static func inspectDirectory(_ directory: URL,
+                                 progressBytes: ((UInt64, UInt64) -> Void)? = nil,
                                  onFile: (GamePackageManifest.File, UInt32) -> Void = { _, _ in }) throws -> Preview {
         func metadata(_ name: String, limit: Int) throws -> Data {
             let url = directory.appendingPathComponent(name)
@@ -360,6 +361,8 @@ public enum GamePackage {
             publisher = try GamePackageSignature.verify(manifest: raw, proof: metadata("nxb.signature.json", limit: 64 << 10))
         }
         var cover: Data?
+        let total = progressBytes == nil ? 0 : manifest.files.reduce(UInt64(0)) { $0 + $1.bytes }
+        var checked: UInt64 = 0
         for file in manifest.files {
             let url = transportFile(file, in: directory)
             var parent = url.deletingLastPathComponent()
@@ -370,21 +373,21 @@ public enum GamePackage {
                 }
                 parent.deleteLastPathComponent()
             }
-            onFile(file, try checksumFile(url, expected: file))
+            let crc = try checksumFile(url, expected: file) { bytes in
+                checked += bytes
+                progressBytes?(checked, total)
+            }
+            onFile(file, crc)
             if file.path == "run/icon.jpg", file.bytes <= 4 << 20 { cover = try Data(contentsOf: url) }
         }
         let gameURL = directory.appendingPathComponent("run/game.json")
-        let gameBytes = try Data(contentsOf: gameURL)
-        guard let game = try JSONSerialization.jsonObject(with: gameBytes) as? [String: Any],
-              game["title_id"] as? String == manifest.titleID, game["name"] as? String == manifest.name,
-              game["dylib"] as? String == "nxgame.dylib" else {
-            throw GamePackageError.invalid("game identity does not match package metadata")
-        }
+        try validateGameIdentity(Data(contentsOf: gameURL), manifest: manifest)
         return Preview(manifest: manifest, publisher: publisher, cover: cover,
                        manifestSHA256: SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined())
     }
 
-    static func checksumFile(_ url: URL, expected file: GamePackageManifest.File) throws -> UInt32 {
+    private static func checksumFile(_ url: URL, expected file: GamePackageManifest.File,
+                                     onBytes: (UInt64) -> Void) throws -> UInt32 {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard attributes[.type] as? FileAttributeType == .typeRegular,
               (attributes[.size] as? NSNumber)?.uint64Value == file.bytes else {
@@ -401,6 +404,7 @@ public enum GamePackage {
             }
             hash.update(data: bytes); crc = NXBArchive.updateCRC(crc, bytes)
             remaining -= UInt64(bytes.count)
+            onBytes(UInt64(bytes.count))
         }
         guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == file.sha256 else {
             throw GamePackageError.invalid("file checksum mismatch")
