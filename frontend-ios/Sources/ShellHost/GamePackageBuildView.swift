@@ -27,6 +27,9 @@ struct GamePackageBuildView: View {
     @State private var progressRun: UUID?
     @State private var stageStartedAt: Date?
     @State private var failure: String?
+    @State private var report = GameBuildReport()
+    @State private var failedBuildReport: String?
+    @State private var reportCopied = false
     @State private var job: GameBuildJob?
     @State private var hasSavedJob = false
 
@@ -70,7 +73,10 @@ struct GamePackageBuildView: View {
                             Button(role: .destructive) {
                                 guard !GameBuildJob.running else { return }
                                 do { try keyStore.remove(); hasKeys = keyStore.exists }
-                                catch { failure = hostText("Could not remove prod.keys. Try again.") }
+                                catch {
+                                    failedBuildReport = nil
+                                    failure = hostText("Could not remove prod.keys. Try again.")
+                                }
                             } label: { Image(systemName: "xmark.circle.fill") }
                                 .buttonStyle(.borderless)
                                 .accessibilityLabel(hostText("Remove prod.keys"))
@@ -147,7 +153,19 @@ struct GamePackageBuildView: View {
                     }
                 }
                 if let failure {
-                    Section { Text(verbatim: failure).textSelection(.enabled) }
+                    Section {
+                        Text(verbatim: failure).textSelection(.enabled)
+                        if let failedBuildReport {
+                            Button {
+                                ShellHostConfig.systemCopyToPasteboard(failedBuildReport)
+                                reportCopied = true
+                            } label: {
+                                Label(reportCopied ? hostText("Build report copied") : hostText("Copy build report"),
+                                      systemImage: reportCopied ? "checkmark" : "doc.on.doc")
+                            }
+                            .accessibilityIdentifier("builder.copyReport")
+                        }
+                    }
                 }
             }
             .disabled(importingKeys)
@@ -184,6 +202,7 @@ struct GamePackageBuildView: View {
                     let error = error as NSError
                     guard !(error.domain == NSCocoaErrorDomain && error.code == NSUserCancelledError),
                           !(error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled) else { return }
+                    failedBuildReport = nil
                     failure = error.localizedDescription
                 }
             }
@@ -207,6 +226,7 @@ struct GamePackageBuildView: View {
         guard !GameBuildJob.running else { return }
         GameBuildJob.running = true
         importingKeys = true
+        failedBuildReport = nil
         defer { importingKeys = false; GameBuildJob.running = false }
         do {
             try await Task.detached(priority: .userInitiated) { [keyStore] in
@@ -289,6 +309,7 @@ struct GamePackageBuildView: View {
         job = nil
         hasSavedJob = false
         failure = nil
+        failedBuildReport = nil
         input = nil
         updates = []
         dlc = []
@@ -296,6 +317,7 @@ struct GamePackageBuildView: View {
 
     private func discard() async {
         guard !building, !GameBuildJob.running else { return }
+        failedBuildReport = nil
         building = true
         GameBuildJob.running = true
         defer { building = false; GameBuildJob.running = false }
@@ -314,6 +336,9 @@ struct GamePackageBuildView: View {
         building = true
         GameBuildJob.running = true
         failure = nil
+        report = GameBuildReport()
+        failedBuildReport = nil
+        reportCopied = false
         defer {
             building = false
             GameBuildJob.running = false
@@ -337,6 +362,7 @@ struct GamePackageBuildView: View {
             } catch {
                 if Task.isCancelled { throw CancellationError() }
                 failure = Self.signingFailureMessage(error)
+                failedBuildReport = report.text(failure: .signingIdentity)
                 return
             }
             try Task.checkCancellation()
@@ -370,6 +396,7 @@ struct GamePackageBuildView: View {
                 for await event in events {
                     guard progressRun == run else { return }
                     if job?.stage != event.stage || job?.detail != event.detail { stageStartedAt = Date() }
+                    report.record(event)
                     job?.record(event, label: stageLabel(event.stage))
                     do { try job?.save() } catch { failure = error.localizedDescription }
                 }
@@ -391,7 +418,9 @@ struct GamePackageBuildView: View {
             installing = true
             // Installation is atomic in the importer. Keep the complete archive if it fails.
             stageStartedAt = Date()
-            job?.record(GameBuildProgress(stage: "install", message: ""), label: stageLabel("install"))
+            let install = GameBuildProgress(stage: "install", message: "")
+            report.record(install)
+            job?.record(install, label: stageLabel("install"))
             try job?.save()
             try await onBuilt(output)
             try await Task.detached(priority: .utility) { try GameBuildJob.discard() }.value
@@ -404,7 +433,9 @@ struct GamePackageBuildView: View {
                 do { try await clearJob() }
                 catch { failure = error.localizedDescription }
             } else {
-                failure = error.localizedDescription
+                let native = error as? NativeGameBuildFailure
+                failure = native == nil ? error.localizedDescription : hostText("Game build failed. Check the build report for details.")
+                failedBuildReport = report.text(failure: installing ? .installFailed : .buildFailed, native: native)
             }
             hasSavedJob = GameBuildJob.exists()
         }

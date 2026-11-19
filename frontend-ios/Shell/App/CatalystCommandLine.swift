@@ -598,7 +598,9 @@ import ShellHost
             try Task.checkCancellation()
         } catch {
             if Task.isCancelled { return reporter.cancelledBuild() }
-            reporter.failure("build_failed", "Game build failed. Check the source game and prod.keys.")
+            let native = error as? NativeGameBuildFailure
+            let message = native?.shader == nil ? "Game build failed." : "Shader compilation failed."
+            reporter.failure("build_failed", message, native: native)
             return 1
         }
         reporter.signingProgress()
@@ -779,11 +781,19 @@ import ShellHost
             else { ShellCommandLine.output("Installed \(titleID).", to: .standardOutput) }
         }
 
-        func failure(_ code: String, _ message: String) {
-            if json { event(["event": "error", "code": code, "message": message]) }
-            else {
+        func failure(_ code: String, _ message: String, native: NativeGameBuildFailure? = nil) {
+            if json {
+                var fields = ["event": "error", "code": code, "message": message]
+                if let shader = native?.shader { fields["shader"] = shader }
+                if let reason = native?.reason { fields["reason"] = reason }
+                event(fields)
+            } else {
                 let prefix = isatty(STDERR_FILENO) == 1 ? "\r\u{1B}[2K" : ""
                 ShellCommandLine.output(prefix + message, to: .standardError)
+                if let shader = native?.shader {
+                    let reason = native?.reason.map { ": " + $0 } ?? ""
+                    ShellCommandLine.output("Shader " + shader + reason, to: .standardError)
+                }
             }
         }
 

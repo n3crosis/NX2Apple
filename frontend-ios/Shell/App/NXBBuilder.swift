@@ -152,7 +152,10 @@ struct NXBBuilder {
                             return 1
                         }, context)
                     }
-                    guard status == 0 else { throw Failure(message: String(cString: error)) }
+                    guard status == 0 else {
+                        let bytes = error.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+                        throw NativeGameBuildFailure(diagnostic: String(decoding: bytes, as: UTF8.self))
+                    }
                     let checkpoint = CompletedBuild(runtimeABI: request.runtimeABI,
                         runtimeRevision: request.runtimeRevision, minOS: request.minOS, size: try outputSize())
                     try JSONEncoder().encode(checkpoint).write(to: completed, options: .atomic)
