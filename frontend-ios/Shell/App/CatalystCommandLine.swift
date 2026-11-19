@@ -40,18 +40,24 @@ import ShellHost
             exit(0)
         }
         let cli = ["import", "build", "list", "export", "share", "inspect", "verify", "receive", "status", "version", "--version", "set-signing", "set-prod-keys"].contains(verb ?? "")
+        if cli { _ = signal(SIGPIPE, SIG_IGN) }
         let command = cli ? parse(arguments) : nil
+        let wantsJSON = cli && arguments.dropFirst().contains("--json")
         if cli && command == nil {
-            output(usage, to: .standardError)
+            if wantsJSON {
+                Reporter(json: true).failure("invalid_arguments", "Invalid arguments. Run nx2apple.sh --help.")
+            } else {
+                output(usage, to: .standardError)
+            }
             exit(64)
         }
         do { if command?.requiresLibraryLock != false { try lockLibrary() } }
         catch {
-            output("NX2Apple is already open or its library is unavailable. Quit the app and retry.", to: .standardError)
+            Reporter(json: wantsJSON).failure("library_unavailable",
+                "NX2Apple is already open or its library is unavailable. Quit the app and retry.")
             exit(75)
         }
         guard let command else { return }
-        _ = signal(SIGPIPE, SIG_IGN)
         let task = Task { @MainActor in
             let code = await run(command)
             exit(code)
@@ -368,11 +374,16 @@ import ShellHost
         if input == "-" {
             // Invitations carry a bearer credential. Scripts can supply one on
             // stdin instead of placing it in argv or shell history.
-            guard isatty(STDIN_FILENO) == 0, let decoded = try? readInvitationLine() else {
+            do {
+                guard isatty(STDIN_FILENO) == 0 else { throw CocoaError(.fileReadCorruptFile) }
+                text = try await readInvitationLine().trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch is CancellationError {
+                reporter.failure("cancelled", "Receive cancelled. No game was installed.")
+                return 130
+            } catch {
                 reporter.failure("invalid_invitation", "Pipe one sharing link into receive -.")
                 return 64
             }
-            text = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
         } else { text = input }
         guard !text.isEmpty, text.utf8.count <= 4096, let invitation = URL(string: text) else {
             reporter.failure("invalid_invitation", "Paste a local or external NX2Apple sharing link.")
@@ -418,21 +429,40 @@ import ShellHost
         #endif
     }
 
-    private static func readInvitationLine() throws -> String {
-        var data = Data()
-        while data.count <= 4096 {
-            guard let chunk = try FileHandle.standardInput.read(upToCount: 4097 - data.count),
-                  !chunk.isEmpty else { break }
-            if let end = chunk.firstIndex(of: 10) {
-                data.append(contentsOf: chunk.prefix(upTo: end))
-                break
+    private static func readInvitationLine() async throws -> String {
+        // Keep the main queue free to deliver SIGINT when a producer leaves the
+        // pipe open without writing a full line. The worker checks cancellation
+        // even if stdin never becomes readable.
+        let input = Task.detached(priority: .userInitiated) { () throws -> String in
+            var descriptor = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+            var buffer = [UInt8](repeating: 0, count: 4097)
+            var data = Data()
+            while data.count < buffer.count {
+                try Task.checkCancellation()
+                let ready = poll(&descriptor, 1, 100)
+                if ready == 0 || (ready < 0 && errno == EINTR) { continue }
+                guard ready > 0, descriptor.revents & Int16(POLLIN | POLLHUP) != 0 else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                let limit = buffer.count - data.count
+                let count = buffer.withUnsafeMutableBytes { read(STDIN_FILENO, $0.baseAddress, limit) }
+                if count < 0 && errno == EINTR { continue }
+                guard count >= 0 else { throw CocoaError(.fileReadCorruptFile) }
+                if count == 0 { break }
+                let chunk = buffer.prefix(count)
+                if let newline = chunk.firstIndex(of: 10) {
+                    data.append(contentsOf: chunk.prefix(upTo: newline))
+                    break
+                }
+                data.append(contentsOf: chunk)
             }
-            data.append(chunk)
+            try Task.checkCancellation()
+            guard data.count <= 4096, let string = String(data: data, encoding: .utf8), !string.isEmpty else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return string
         }
-        guard data.count <= 4096, let string = String(data: data, encoding: .utf8), !string.isEmpty else {
-            throw CocoaError(.fileReadCorruptFile)
-        }
-        return string
+        return try await withTaskCancellationHandler { try await input.value } onCancel: { input.cancel() }
     }
 
     private final class ReceiveProgress: @unchecked Sendable {

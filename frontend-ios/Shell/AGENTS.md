@@ -70,4 +70,11 @@ cli receive - --json < "/path/to/private-invitation.txt"
 
 `status` reports whether the saved signing identity is valid, whether the build keys are accessible, and which runtime is embedded. It does not print secrets or paths. `inspect` reads package metadata, while `verify` reads and hashes the payload without installing. Verification reports trust and compatibility separately. With `--require-compatible`, it returns nonzero when this runtime cannot load the package. An unsigned or unknown publisher is not described as trusted just because its payload matches its manifest.
 
-`receive` accepts a pasteable invitation or an NX2Apple receive link. Using `-` with a pipe or redirected private file keeps the link out of process arguments. Add `--external` only for an internet link. Publisher trust and runtime compatibility are checked before downloading the payload. An unknown or unsigned publisher requires `--allow-untrusted`; only use it for a known source. Received files are verified and installed directly without creating an intermediate NXB. No existing title is replaced. Ctrl-C stops a long operation at a safe boundary. JSON events go to stdout.
+`receive` accepts a pasteable invitation or an NX2Apple receive link. Using `-` with a pipe or redirected private file keeps the link out of process arguments. Add `--external` only for an internet link. Publisher trust and runtime compatibility are checked before downloading the payload. An unknown or unsigned publisher requires `--allow-untrusted`; only use it for a known source. Received files are verified and installed directly without creating an intermediate NXB. No existing title is replaced. Ctrl-C also cancels while waiting for a piped invitation. JSON events go to stdout, including `invalid_arguments` for invalid arguments to a recognized command and `library_unavailable` if it cannot acquire the library lock.
+
+
+For the CLI error smoke check, run `cli build --json` and expect a single
+`invalid_arguments` event with exit status 64. Then run `cli receive - --json`
+with stdin connected to a pipe whose writer remains open without sending a line.
+Send SIGINT to the CLI process and check that it exits 130 with a `cancelled`
+event, before the pipe writer closes. Neither check needs game files.
