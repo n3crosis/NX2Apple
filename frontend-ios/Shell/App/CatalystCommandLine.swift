@@ -496,13 +496,25 @@ import ShellHost
             reporter.failure("output_exists", "The output already exists. Choose a new NXB path.")
             return nil
         }
+        let fm = FileManager.default
         do {
-            try FileManager.default.createDirectory(at: outputStage, withIntermediateDirectories: false,
+            try fm.createDirectory(at: outputStage, withIntermediateDirectories: false,
                                                     attributes: [.posixPermissions: 0o700])
         } catch {
             reporter.failure("output_unavailable", "The app cannot write to the output directory.")
             return nil
         }
+        // Check the same filesystem now, before compiling or signing a game.
+        let probe = outputStage.appendingPathComponent(".probe")
+        let probeLink = outputStage.appendingPathComponent(".probe-link")
+        guard fm.createFile(atPath: probe.path, contents: Data(), attributes: [.posixPermissions: 0o600]),
+              link(probe.path, probeLink.path) == 0 else {
+            try? fm.removeItem(at: outputStage)
+            reporter.failure("output_unavailable", "The output folder does not support safe publication. Choose a writable folder on a filesystem that supports hard links.")
+            return nil
+        }
+        try? fm.removeItem(at: probeLink)
+        try? fm.removeItem(at: probe)
         return outputStage.appendingPathComponent("game.nxb")
     }
 
